@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node tools/trackscore.js *)",
+      "Bash(node tools/trackscore.js)",
+      "Bash(node tools/race-sim.js *)",
+      "Bash(node tools/race-sim.js)"
+    ]
+  }
+}

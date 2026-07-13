@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/marcelo/.cache/ms-playwright/**)",
+      "Bash(node -e \"try{require.resolve\\('playwright'\\);console.log\\('playwright ok'\\)}catch\\(e\\){console.log\\('no playwright'\\)}\")",
+      "Bash(npm ls *)",
+      "Bash(python3 -)",
+      "Bash(node -e \"console.log\\(require.resolve\\('playwright'\\)\\)\")",
+      "Read(//home/marcelo/node_modules/**)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node e2e.js)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node debug1.js)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node shots.js)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node bisect.js)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node probe.js)",
+      "Bash(node geo.js)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node cam-test.js)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node dbl-debug.js)",
+      "Bash(npx playwright *)",
+      "WebSearch",
+      "Bash(node tools/trackscore.js)",
+      "Bash(time node tools/race-sim.js --rounds 0)",
+      "Bash(node tools/race-sim.js --rounds 0)",
+      "Bash(node tools/trackscore.js ../golden-lap.html --svg \"/tmp/claude-1000/-home-marcelo-code-goldenlap/16bbe4fa-a38d-4d1b-bd22-082fedca724c/scratchpad/svg\")",
+      "Bash(grep -n \"^\\(function\\\\|^if \\(typeof window\\\\|\\(function\\(\\){$\\\\|^}\\)\\(\\);\\\\s*$\" golden-lap.html)",
+      "Bash(node *)",
+      "Bash(NODE_PATH=/home/marcelo/node_modules node *)",
+      "Bash(xargs -d '\\\\n' jq -r 'select\\(.type==\"assistant\"\\) | .message.content[]? | select\\(.type==\"tool_use\"\\) | if .name==\"Bash\" then \"BASH\\\\t\" + \\(\\(.input.command // \"\"\\) | gsub\\(\"\\\\n\";\" \"\\) | .[0:80]\\) else \"TOOL\\\\t\" + .name end')"
+    ]
+  }
+}
