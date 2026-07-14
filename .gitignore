@@ -1,0 +1,7 @@
+node_modules/
+dist/
+output/
+*.trace
+playwright-report/
+test-results/
+.DS_Store

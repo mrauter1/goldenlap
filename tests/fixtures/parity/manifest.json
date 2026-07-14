@@ -1,0 +1,76 @@
+{
+  "fixtureSchema": 1,
+  "capturedFrom": {
+    "gitHead": "84a1380da2c2f4050ff9aeb35579eb1ce0679f9f",
+    "indexSha256": "3fd4f355937f21fa5e25379d9ff83853af950cbcae47d5a466fc62b1ac1db0a8",
+    "redirectSha256": "0b291b7ee4192de48c58ecc1bd2f5364d2c828f7868a5e3835f72c8291bf5561",
+    "bun": "1.3.14",
+    "node": "22.22.1",
+    "playwright": "1.58.2"
+  },
+  "greenBaseline": {
+    "trackscore": "6/6 tracks pass",
+    "racecraftCheck": "6/6 tracks and capsule checks pass",
+    "racecraftEdgeCheck": "qualifying, normal pits, one-tick blue flag, obstacle and recovery pass",
+    "racecraftUiCheck": "desktop, 1x/4x/8x, pause and mobile smoke pass",
+    "raceSimDrySeed1": { "passes": 1135, "errors": 0 },
+    "raceSimRainSeed1": { "passes": 1304, "errors": 0 }
+  },
+  "runtime": {
+    "api": [
+      { "key": "BUILT", "shape": "object", "writable": true },
+      { "key": "CALENDAR", "shape": "object", "writable": true },
+      { "key": "DRIVERS", "shape": "object", "writable": true },
+      { "key": "G", "shape": "object", "writable": true },
+      { "key": "PHYS", "shape": "object", "writable": true },
+      { "key": "S", "shape": "getter", "writable": false },
+      { "key": "TEAM_DEFS", "shape": "object", "writable": true },
+      { "key": "TRACK_DEFS", "shape": "object", "writable": true },
+      { "key": "botStep", "shape": "function", "writable": true },
+      { "key": "buildCorners", "shape": "function", "writable": true },
+      { "key": "buildTrack", "shape": "function", "writable": true },
+      { "key": "collideCars", "shape": "function", "writable": true },
+      { "key": "compileResults", "shape": "function", "writable": true },
+      { "key": "entryMargin", "shape": "function", "writable": true },
+      { "key": "makeCar", "shape": "function", "writable": true },
+      { "key": "nextCorner", "shape": "function", "writable": true },
+      { "key": "pickTeam", "shape": "function", "writable": true },
+      { "key": "playerEntry", "shape": "function", "writable": true },
+      { "key": "qualiBox", "shape": "function", "writable": true },
+      { "key": "qualiEnd", "shape": "function", "writable": true },
+      { "key": "qualiSend", "shape": "function", "writable": true },
+      { "key": "raceLapsFor", "shape": "function", "writable": true },
+      { "key": "racingLine", "shape": "function", "writable": true },
+      { "key": "setScale", "shape": "function", "writable": true },
+      { "key": "sheetAction", "shape": "function", "writable": true },
+      { "key": "speedProfile", "shape": "function", "writable": true },
+      { "key": "startRace", "shape": "function", "writable": true },
+      { "key": "startWeekend", "shape": "function", "writable": true },
+      { "key": "stepCar", "shape": "function", "writable": true },
+      { "key": "stepSession", "shape": "function", "writable": true },
+      { "key": "trackSense", "shape": "function", "writable": true }
+    ],
+    "data": {
+      "calendar": [[0, "PRADO VERDE GP", 0.15], [1, "COSTA DO SOL GP", 0.25], [2, "NORDWALD GP", 0.55], [3, "VILLA REALE GP", 0.35], [4, "ANHEMBI GP", 0.15], [5, "GRAN PREMIO CERRO ALTO", 0.6]],
+      "drivers": [["BAR", "Rui Barreto"], ["ROC", "Émile Rocard"], ["VAL", "Tommy Vale"], ["ADL", "Heinz Adler"], ["VAN", "Nikos Vane"], ["CRU", "Beto Cruz"], ["MOR", "Sal Moreno"], ["MIL", "Jack Mills"]],
+      "teams": [["aurelio", "Scuderia Aurelio"], ["wolfe", "Wolfe Racing"], ["tropical", "Garagem Tropical"], ["konig", "Königsblau GP"], ["falcon", "Falcon-Nash"], ["eclair", "Éclair Bleue"]]
+    },
+    "dom": { "canvas": true, "hud": true, "menu": true, "sheet": true, "title": "Golden Lap — Team Manager" },
+    "numericNormalization": "round-to-1e-8, FNV-1a UTF-16 token stream",
+    "schema": 1,
+    "seed": 334462,
+    "seeded": {
+      "gameBefore": { "menuDisplay": "flex", "phase": "menu", "round": 0, "teamCards": 3, "teamI": -1 },
+      "gameReady": { "drivers": [0, 1], "money": 24, "phase": "quali", "philosophy": 0, "round": 0, "sponsor": 0, "staff": [0, 0], "teamI": 0 },
+      "session": { "entryHash": "a107a2c5", "mode": "quali", "phase": "run", "states": { "box": 12 }, "t": 5, "wet": 0 }
+    },
+    "tracks": [
+      { "centerLapTime": 57.4223175, "cornersHash": "98822f32", "id": "prado", "len": 2751.29537197, "lineLapTime": 55.07543197, "n": 1376, "pitHash": "73524e07", "profileHash": "d7021ca3", "samplesHash": "997d7f5c", "step": 1.99948792 },
+      { "centerLapTime": 65.91122314, "cornersHash": "f2e8155b", "id": "costa", "len": 3538.64870419, "lineLapTime": 63.8641079, "n": 1769, "pitHash": "b202743a", "profileHash": "07dc1f53", "samplesHash": "8f881a00", "step": 2.00036671 },
+      { "centerLapTime": 82.10522918, "cornersHash": "812b864b", "id": "nordwald", "len": 4404.6979973, "lineLapTime": 78.82791178, "n": 2202, "pitHash": "b9c8f361", "profileHash": "d277e627", "samplesHash": "441aec49", "step": 2.00031698 },
+      { "centerLapTime": 64.91179734, "cornersHash": "912e12f3", "id": "villa", "len": 2392.66010921, "lineLapTime": 63.23669883, "n": 1196, "pitHash": "fb023824", "profileHash": "e39d3bf4", "samplesHash": "f710edd6", "step": 2.00055193 },
+      { "centerLapTime": 71.97440073, "cornersHash": "53777404", "id": "anhembi", "len": 3624.97740149, "lineLapTime": 69.57553698, "n": 1812, "pitHash": "6364de91", "profileHash": "6a480109", "samplesHash": "b51f331b", "step": 2.0005394 },
+      { "centerLapTime": 71.24642971, "cornersHash": "5e30c6fa", "id": "cerro", "len": 3449.88735226, "lineLapTime": 69.40754627, "n": 1725, "pitHash": "f89bf1eb", "profileHash": "4b5a6403", "samplesHash": "030e41f7", "step": 1.9999347 }
+    ]
+  }
+}

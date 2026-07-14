@@ -1,0 +1,23 @@
+export const TEAM_DEFS = [
+  { id: 'aurelio', name: 'Scuderia Aurelio', country: 'ITA', body: '#C63D33', accent: '#F5F1E6',
+    budget: 128, tier: 0.952, pick: true,
+    desc: 'The old giant. Deep pockets, a proud history, and a board that expects wins.',
+    drv: [{ n: 'G. Ferrero', c: 'FER' }, { n: 'L. Baldi', c: 'BAL' }] },
+  { id: 'wolfe', name: 'Wolfe Racing', country: 'GBR', body: '#2F6B4F', accent: '#E9B44C',
+    budget: 96, tier: 0.943, pick: true,
+    desc: 'A sharp midfield outfit run from a Surrey shed. Punches above its weight.',
+    drv: [{ n: 'J. Fletcher', c: 'FLE' }, { n: 'P. Whitmore', c: 'WHI' }] },
+  { id: 'tropical', name: 'Garagem Tropical', country: 'BRA', body: '#E9B44C', accent: '#2E7DA6',
+    budget: 72, tier: 0.9315, pick: true,
+    desc: 'Underdogs from S\u00E3o Paulo. Every dollar counts, every point is a party.',
+    drv: [{ n: 'C. Nogueira', c: 'NOG' }, { n: 'Z. Prado', c: 'PRA' }] },
+  { id: 'konig', name: 'K\u00F6nigsblau GP', country: 'GER', body: '#2E4E86', accent: '#F5F1E6',
+    budget: 0, tier: 0.950,
+    drv: [{ n: 'W. Brandt', c: 'BRA' }, { n: 'K. Vogel', c: 'VOG' }] },
+  { id: 'falcon', name: 'Falcon-Nash', country: 'USA', body: '#EDE6D4', accent: '#2E4E86',
+    budget: 0, tier: 0.939,
+    drv: [{ n: 'B. Colton', c: 'COL' }, { n: 'D. Mercer', c: 'MER' }] },
+  { id: 'eclair', name: '\u00C9clair Bleue', country: 'FRA', body: '#5E86B5', accent: '#F5F1E6',
+    budget: 0, tier: 0.9295,
+    drv: [{ n: 'A. Giroux', c: 'GIR' }, { n: 'M. Laurent', c: 'LAU' }] }
+];
