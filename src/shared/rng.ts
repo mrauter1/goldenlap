@@ -1,5 +1,23 @@
 export type RandomSource = () => number;
 
+let activeSource: RandomSource | null = null;
+
+/** Gameplay random source. Defaults to the host source so browser seed hooks remain compatible. */
+export function random(): number {
+  return activeSource ? activeSource() : Math.random();
+}
+
+/** Run one synchronous simulation with an isolated random stream. */
+export function withRandomSource<T>(source: RandomSource, action: () => T): T {
+  const previous = activeSource;
+  activeSource = source;
+  try {
+    return action();
+  } finally {
+    activeSource = previous;
+  }
+}
+
 export function mulberry32(seed: number): RandomSource {
   let state = seed >>> 0;
   return (): number => {

@@ -1,0 +1,5 @@
+{
+  "observations": [
+    { "metric": "priority.qualifying_loss_straight_seconds", "value": 0.5, "samples": 24 }
+  ]
+}

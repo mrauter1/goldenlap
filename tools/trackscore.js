@@ -4,7 +4,7 @@
 // Usage: node tools/trackscore.js [path-to-html] [--json]
 const path = require('path');
 const fs = require('fs');
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./lib/browser');
 
 const target = process.argv[2] && !process.argv[2].startsWith('--')
   ? process.argv[2]
@@ -184,7 +184,7 @@ function analyze(PHYS) {
 }
 
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await launchBrowser();
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));

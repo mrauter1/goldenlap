@@ -1,72 +1,56 @@
-import { TAU, clamp, normAng } from '../shared/math';
+import { TAU, clamp } from '../shared/math';
 import { mulberry32 } from '../shared/rng';
 import {
   denseArray, numericArray,
   type CurbSegment, type Decoration, type DecorationType, type DenseArray,
   type NearestSample, type Track, type TrackCheckpoint, type TrackDefinition
 } from './model';
+import { buildTrackSurfaceMap } from './surface';
+import { sampleTrackCenterline } from './track-geometry';
 
-export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
-  const P = def.pts, n = P.length;
-  // dense Catmull-Rom sampling
-  const rx = denseArray<number>(), ry = denseArray<number>();
-  for (let i = 0; i < n; i++){
-    const p0 = P[(i - 1 + n) % n]!, p1 = P[i]!, p2 = P[(i + 1) % n]!, p3 = P[(i + 2) % n]!;
-    const segLen = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
-    const steps = Math.max(8, Math.ceil(segLen / 1.2));
-    for (let k = 0; k < steps; k++){
-      const t = k / steps, t2 = t * t, t3 = t2 * t;
-      rx.push(0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t +
-        (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
-        (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3));
-      ry.push(0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t +
-        (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
-        (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3));
+function widthAtFraction(def: TrackDefinition, fraction: number): number {
+  const profile = def.widthProfile;
+  if (!profile?.length) return def.width;
+  const value = ((fraction % 1) + 1) % 1;
+  for (let index = 0; index < profile.length; index++) {
+    const from = profile[index]!;
+    const to = profile[(index + 1) % profile.length]!;
+    const end = index + 1 < profile.length ? to.at : to.at + 1;
+    const at = value < from.at ? value + 1 : value;
+    if (at <= end) {
+      const progress = (at - from.at) / Math.max(1e-9, end - from.at);
+      return from.width + (to.width - from.width) * progress;
     }
   }
-  // cumulative length (closed)
-  const M = rx.length;
-  const cum = numericArray(M + 1);
-  for (let i = 0; i < M; i++){
-    const j = (i + 1) % M;
-    cum[i + 1] = cum[i]! + Math.hypot(rx[j]! - rx[i]!, ry[j]! - ry[i]!);
+  return profile[0]!.width;
+}
+
+function validateWidthDefinition(def: TrackDefinition): void {
+  if (!Number.isFinite(def.width) || def.width <= 0)
+    throw new Error(`Track ${def.id} width must be finite and positive`);
+  if (!def.widthProfile) return;
+  if (def.widthProfile.length < 2)
+    throw new Error(`Track ${def.id} width profile needs at least two keys`);
+  let previous = -Infinity;
+  for (const key of def.widthProfile) {
+    if (!Number.isFinite(key.at) || key.at < 0 || key.at >= 1 || key.at <= previous)
+      throw new Error(`Track ${def.id} width keys must be strictly ordered in [0, 1)`);
+    if (!Number.isFinite(key.width) || key.width <= 0)
+      throw new Error(`Track ${def.id} profile widths must be finite and positive`);
+    previous = key.at;
   }
-  const total = cum[M]!;
-  // uniform resample
-  const N = Math.max(64, Math.round(total / 2.0));
-  const step = total / N;
-  const X = numericArray(N), Y = numericArray(N);
-  let seg = 0;
-  for (let i = 0; i < N; i++){
-    const s = i * step;
-    while (seg < M - 1 && cum[seg + 1]! < s) seg++;
-    const span = Math.max(1e-9, cum[seg + 1]! - cum[seg]!);
-    const f = (s - cum[seg]!) / span;
-    const j = (seg + 1) % M;
-    X[i] = rx[seg]! + (rx[j]! - rx[seg]!) * f;
-    Y[i] = ry[seg]! + (ry[j]! - ry[seg]!) * f;
-  }
-  // tangents, normals, curvature
-  const TX = numericArray(N), TY = numericArray(N);
-  const NX = numericArray(N), NY = numericArray(N);
-  const HD = numericArray(N), K = numericArray(N), kSm = numericArray(N);
-  for (let i = 0; i < N; i++){
-    const p = (i - 1 + N) % N, q = (i + 1) % N;
-    const dx = X[q]! - X[p]!, dy = Y[q]! - Y[p]!;
-    const l = Math.max(1e-9, Math.hypot(dx, dy));
-    TX[i] = dx / l; TY[i] = dy / l;
-    NX[i] = -TY[i]!; NY[i] = TX[i]!;
-    HD[i] = Math.atan2(TY[i]!, TX[i]!);
-  }
-  for (let i = 0; i < N; i++){
-    const p = (i - 1 + N) % N, q = (i + 1) % N;
-    K[i] = normAng(HD[q]! - HD[p]!) / (2 * step);
-  }
-  for (let i = 0; i < N; i++){
-    let acc = 0;
-    for (let d = -3; d <= 3; d++) acc += K[(i + d + N) % N]!;
-    kSm[i] = acc / 7;
-  }
+}
+
+export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
+  validateWidthDefinition(def);
+  const sampled = sampleTrackCenterline(def.pts);
+  const N = sampled.n;
+  const step = sampled.step;
+  const X = sampled.x, Y = sampled.y;
+  const TX = sampled.tx, TY = sampled.ty;
+  const NX = sampled.nx, NY = sampled.ny;
+  const HD = sampled.heading, K = sampled.k, kSm = sampled.kSm;
+  const total = sampled.len;
   // spatial hash
   const cell = 24, hash = new Map<string, DenseArray<number>>();
   for (let i = 0; i < N; i++){
@@ -75,10 +59,16 @@ export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
     if (!arr){ arr = denseArray<number>(); hash.set(key, arr); }
     arr.push(i);
   }
-  const hw = def.width / 2;
+  const halfWidth = numericArray(N);
+  let hw = Infinity;
+  for (let index = 0; index < N; index++) {
+    const local = widthAtFraction(def, index / N) / 2;
+    halfWidth[index] = local;
+    hw = Math.min(hw, local);
+  }
   const track = {
     def, n: N, step, x: X, y: Y, tx: TX, ty: TY, nx: NX, ny: NY,
-    k: K, kSm, len: total, hw, cell, hash
+    k: K, kSm, len: total, hw, halfWidth, cell, hash
   } as Track;
   // checkpoints (start line handled separately, by segment crossing)
   const spacing = Math.max(6, Math.round(45 / step));
@@ -89,36 +79,41 @@ export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
   track.cps = cps;
   track.cpR = 13.5;
   // start/finish line segment (slightly wider than the road)
+  const startHalfWidth = halfWidth[0]!;
   track.line = {
-    ax: X[0]! + NX[0]! * (hw + 1.5), ay: Y[0]! + NY[0]! * (hw + 1.5),
-    bx: X[0]! - NX[0]! * (hw + 1.5), by: Y[0]! - NY[0]! * (hw + 1.5),
+    ax: X[0]! + NX[0]! * (startHalfWidth + 1.5),
+    ay: Y[0]! + NY[0]! * (startHalfWidth + 1.5),
+    bx: X[0]! - NX[0]! * (startHalfWidth + 1.5),
+    by: Y[0]! - NY[0]! * (startHalfWidth + 1.5),
     tx: TX[0]!, ty: TY[0]!, x: X[0]!, y: Y[0]!
   };
   // grid slot ~20 m before the line
   const gi = (N - Math.max(4, Math.round(20 / step))) % N;
   track.grid = { x: X[gi]!, y: Y[gi]!, h: HD[gi]!, i: gi };
+  // One per-sample/per-side surface authority. Rendering consumes the same
+  // authored masks used by physics, planning and profile validation.
+  track.surface = buildTrackSurfaceMap(track);
   // curbs
   const curbs = denseArray<CurbSegment>();
-  const pushCurb = (i: number, sgn: number): void => {
+  const pushCurb = (i: number, sgn: -1 | 1): void => {
     const j = (i + 1) % N;
-    const i0 = hw - 0.25, i1 = hw + 1.15;
+    const i0 = track.surface.curbInnerAt[i]!, i1 = track.surface.curbOuterAt[i]!;
+    const j0 = track.surface.curbInnerAt[j]!, j1 = track.surface.curbOuterAt[j]!;
     curbs.push({
       p: [
         X[i]! + NX[i]! * sgn * i0, Y[i]! + NY[i]! * sgn * i0,
-        X[j]! + NX[j]! * sgn * i0, Y[j]! + NY[j]! * sgn * i0,
-        X[j]! + NX[j]! * sgn * i1, Y[j]! + NY[j]! * sgn * i1,
+        X[j]! + NX[j]! * sgn * j0, Y[j]! + NY[j]! * sgn * j0,
+        X[j]! + NX[j]! * sgn * j1, Y[j]! + NY[j]! * sgn * j1,
         X[i]! + NX[i]! * sgn * i1, Y[i]! + NY[i]! * sgn * i1
       ] as DenseArray<number>,
-      red: (Math.floor(i * step / 3.2) % 2) === 0
+      red: (Math.floor(i * step / 3.2) % 2) === 0,
+      index: i,
+      side: sgn
     });
   };
   for (let i = 0; i < N; i++){
-    const r = 1 / Math.max(Math.abs(kSm[i]!), 1e-9);
-    if (r < 130){
-      const sgn = kSm[i]! > 0 ? 1 : -1;
-      pushCurb(i, sgn);
-      if (r < 75) pushCurb(i, -sgn);
-    }
+    if (track.surface.curbNegative[i]) pushCurb(i, -1);
+    if (track.surface.curbPositive[i]) pushCurb(i, 1);
   }
   track.curbs = curbs;
   // min radius
@@ -129,12 +124,18 @@ export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
   // exit ramp merging back shortly after the line. Cars drive the whole thing.
   {
     // PIT_TEAMS sizes the lane; raise it (max 11) when the grid grows to 22 cars
-    const rampIn = 42, rampOut = 46, boxW0 = 58, boxGap = 10, nBox = pitTeams;
-    const Lp = rampIn + 16 + nBox * boxGap + 22 + rampOut;
-    const sExit = 52;
+    const nBox = pitTeams;
+    const grand = def.pit?.class === 'grand';
+    const rampIn = grand ? 64 : 42;
+    const rampOut = grand ? 80 : 46;
+    const boxW0 = grand ? 88 : 58;
+    const boxGap = grand ? 14 : 10;
+    const boxTail = grand ? 32 : 22;
+    const Lp = boxW0 + nBox * boxGap + boxTail + rampOut;
+    const sExit = grand ? 80 : 52;
     const sEntry = ((sExit - Lp) % total + total) % total;
-    const laneOff = hw + 4.6, boxOff = hw + 7.8;
-    const roadOff = Math.min(3.2, hw - 2.0);
+    const laneOff = startHalfWidth + 4.6, boxOff = startHalfWidth + 7.8;
+    const roadOff = Math.min(3.2, startHalfWidth - 2.0);
     const sm = (u: number): number => { u = clamp(u, 0, 1); return u * u * (3 - 2 * u); };
     const wOf = (s: number): number => ((s - sEntry) % total + total) % total;
     const off = (w: number): number => {
@@ -173,7 +174,7 @@ export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
     const g = hashNearest(track, x, y, 6);
     if (g.i < 0) continue;
     const d = Math.sqrt(g.d2);
-    if (d < hw + 8 || d > 92) continue;
+    if (d < halfWidth[g.i]! + 8 || d > 92) continue;
     const t = rng();
     let type: DecorationType, r: number, solid: boolean;
     if (t < 0.52){ type = 'tree'; r = 2.8 + rng() * 2.6; solid = true; }
@@ -215,8 +216,8 @@ export function buildTrack(def: TrackDefinition, pitTeams = 6): Track {
       const i = (p.i + j * 2 + N) % N;
       decor.push({
         type: 'bale',
-        x: X[i]! - NX[i]! * sgn * (hw + 3.4),
-        y: Y[i]! - NY[i]! * sgn * (hw + 3.4),
+        x: X[i]! - NX[i]! * sgn * (halfWidth[i]! + 3.4),
+        y: Y[i]! - NY[i]! * sgn * (halfWidth[i]! + 3.4),
         r: 1.0, solid: true, rot: HD[i]!, vr: rng()
       });
     }

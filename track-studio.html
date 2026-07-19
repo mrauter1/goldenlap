@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Golden Lap — Track Studio</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --paper: #f5f1e6;
+      --ink: #211e2a;
+      --panel: #2c2836;
+      --panel-2: #383242;
+      --muted: #aaa2b5;
+      --gold: #e9b44c;
+      --red: #d95b43;
+      --green: #7fbf6a;
+      --blue: #7fa0c5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 360px;
+      background: #18151f;
+      color: var(--paper);
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 17px 22px;
+      border-bottom: 1px solid #514a5d;
+      background: var(--ink);
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 20px; letter-spacing: .04em; }
+    h1 em { color: var(--gold); font-style: normal; }
+    header p { color: var(--muted); }
+    .studio {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) minmax(520px, 1fr) minmax(300px, 370px);
+      gap: 12px;
+      padding: 12px;
+      min-height: calc(100vh - 64px);
+    }
+    .panel {
+      min-width: 0;
+      padding: 14px;
+      border: 1px solid #50495b;
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: 0 8px 30px rgba(0,0,0,.18);
+    }
+    .panel > h2 {
+      margin-bottom: 12px;
+      color: var(--gold);
+      font-size: 14px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h3 {
+      margin: 17px 0 8px;
+      color: var(--paper);
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    label { color: var(--muted); font-size: 12px; }
+    select, input, textarea, button {
+      border: 1px solid #5d5669;
+      border-radius: 6px;
+      background: #211e29;
+      color: var(--paper);
+      font: inherit;
+    }
+    select, input[type="number"] { width: 100%; padding: 8px; }
+    textarea {
+      width: 100%;
+      min-height: 105px;
+      padding: 9px;
+      resize: vertical;
+      font: 11px/1.4 ui-monospace, monospace;
+    }
+    button {
+      padding: 8px 10px;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    button:hover { border-color: var(--gold); }
+    .field { display: grid; gap: 5px; margin-bottom: 10px; }
+    .row { display: flex; align-items: end; gap: 7px; }
+    .row > .field { flex: 1; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    #signature-editor {
+      display: grid;
+      gap: 7px;
+      max-height: 330px;
+      padding-right: 3px;
+      overflow: auto;
+    }
+    .group-block {
+      display: grid;
+      gap: 4px;
+      padding: 2px;
+      border-radius: 8px;
+      background: rgba(33,30,41,.45);
+    }
+    .group-block.fixed { border-left: 2px solid #6c6577; }
+    .group-block.movable { border-left: 2px solid var(--blue); }
+    .group-block.flex { border-right: 2px solid var(--gold); }
+    .group-block.grid-pit { border-top: 2px solid var(--green); }
+    .token-row, .lobe-row, .detail-row {
+      display: grid;
+      grid-template-columns: minmax(112px, 1fr) minmax(70px, 1fr) 28px minmax(70px, 1fr) 28px;
+      align-items: center;
+      gap: 5px;
+      padding: 7px;
+      border: 1px solid #514a5d;
+      border-radius: 7px;
+      background: var(--panel-2);
+      cursor: grab;
+    }
+    .lobe-row, .detail-row {
+      margin-left: 13px;
+      padding: 5px 7px;
+      border-color: #494252;
+      background: #292531;
+      cursor: default;
+    }
+    .token-row[draggable="false"] { cursor: default; }
+    .token-row b, .lobe-row b, .detail-row b { font-size: 11px; }
+    .token-row input, .lobe-row input, .detail-row input {
+      min-width: 0;
+      accent-color: var(--gold);
+    }
+    .token-row span, .lobe-row span, .detail-row span {
+      color: var(--muted);
+      font: 10px ui-monospace, monospace;
+    }
+    .group-realization {
+      padding: 1px 8px 3px;
+      color: var(--blue);
+      font: 10px ui-monospace, monospace;
+    }
+    .group-details { margin: 0 4px 4px 13px; }
+    .group-details summary {
+      padding: 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 10px;
+    }
+    .view-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 11px;
+      margin-bottom: 10px;
+    }
+    .toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--paper); }
+    .toggle input { accent-color: var(--gold); }
+    .canvas-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .canvas-grid:has(#compare-view:not([hidden])) { grid-template-columns: 1fr 1fr; }
+    canvas {
+      width: 100%;
+      height: min(62vh, 660px);
+      min-height: 420px;
+      border: 1px solid #5d5669;
+      border-radius: 8px;
+      background: #829d68;
+      touch-action: none;
+    }
+    #rhythm-strip { height: 94px; min-height: 94px; margin-top: 8px; }
+    #status-line {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-left: 3px solid var(--gold);
+      background: #211e29;
+      color: var(--muted);
+      font: 11px ui-monospace, monospace;
+    }
+    #studio-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    #studio-metrics span { padding: 7px; border-radius: 5px; background: #211e29; }
+    #studio-metrics span:first-child { grid-column: 1 / -1; color: var(--gold); }
+    #gate-list { display: grid; gap: 5px; max-height: 315px; overflow: auto; }
+    .gate {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 2px 8px;
+      padding: 7px;
+      border-left: 3px solid var(--muted);
+      background: #211e29;
+      font-size: 11px;
+    }
+    .gate small { grid-column: 1 / -1; color: var(--muted); }
+    .gate.green { border-color: var(--green); }
+    .gate.amber { border-color: var(--gold); }
+    .gate.red { border-color: var(--red); }
+    #corner-histogram { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+    .histogram-row { display: grid; grid-template-columns: 62px 1fr 24px; align-items: center; gap: 7px; }
+    .histogram-row i { height: 8px; min-width: 2px; border-radius: 9px; background: var(--blue); }
+    .histogram-row b { text-align: right; color: var(--paper); }
+    .artifact-status { padding: 8px; color: var(--muted); background: #211e29; }
+    @media (max-width: 1180px) {
+      .studio { grid-template-columns: 300px minmax(500px, 1fr); }
+      .validate { grid-column: 1 / -1; }
+    }
+    @media (max-width: 820px) {
+      header { display: block; }
+      .studio { grid-template-columns: 1fr; }
+      .validate { grid-column: auto; }
+      canvas { min-height: 340px; }
+    }
+  </style>
+  <script defer src="./dist/track-studio.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Golden Lap <em>Track Studio</em></h1>
+    <p>Deterministic rhythm-to-circuit authoring · offline and file:// safe</p>
+  </header>
+  <main class="studio">
+    <section class="panel generate">
+      <h2>Generate</h2>
+      <div class="row">
+        <label class="field">Archetype
+          <select id="archetype">
+            <option value="power">Power · 6–8 km</option>
+            <option value="balanced" selected>Balanced · 4–5.5 km</option>
+            <option value="technical">Technical · 3–4.5 km</option>
+          </select>
+        </label>
+        <label class="field">Seed
+          <input id="seed" type="number" min="0" max="4294967295" step="1" value="0">
+        </label>
+      </div>
+      <div class="button-row">
+        <button id="scramble-all" type="button"
+          title="Randomize corner ordering and corner parameters">Scramble</button>
+        <button id="scramble-parameters" type="button"
+          title="Randomize corner and complex ranges without changing their order">Scramble Parameters</button>
+        <button id="scramble-ordering" type="button"
+          title="Reorder corners and complexes while preserving straight slots">Scramble Corner Ordering</button>
+      </div>
+      <h3>Shape groups</h3>
+      <div id="signature-editor"></div>
+      <h3>Signature JSON</h3>
+      <textarea id="signature-json" spellcheck="false" aria-label="Rhythm signature JSON"></textarea>
+      <div class="button-row">
+        <button id="load-signature" type="button">Load JSON</button>
+        <button id="copy-signature" type="button">Copy JSON</button>
+      </div>
+    </section>
+
+    <section class="panel view">
+      <h2>View</h2>
+      <div class="view-toolbar">
+        <label class="toggle"><input id="overlay-line" type="checkbox" checked> Draft line</label>
+        <label class="toggle"><input id="overlay-corners" type="checkbox" checked> Corners</label>
+        <label class="toggle"><input id="overlay-pass" type="checkbox" checked> Pass scores</label>
+        <label class="toggle"><input id="overlay-braking" type="checkbox" checked> Braking</label>
+        <label class="toggle"><input id="overlay-straight" type="checkbox" checked> Longest straight</label>
+        <label class="toggle"><input id="overlay-geometry" type="checkbox" checked> Group geometry</label>
+        <button id="pin-compare" type="button">Pin comparison</button>
+        <button id="reset-view" type="button">Reset view</button>
+      </div>
+      <div class="canvas-grid">
+        <canvas id="track-view" width="1100" height="720" aria-label="Generated track view"></canvas>
+        <canvas id="compare-view" width="700" height="720" aria-label="Pinned comparison" hidden></canvas>
+      </div>
+      <canvas id="rhythm-strip" width="1100" height="94" aria-label="Curvature rhythm strip"></canvas>
+      <div id="status-line">Starting deterministic generator…</div>
+    </section>
+
+    <section class="panel validate">
+      <h2>Validate &amp; export</h2>
+      <div id="studio-metrics"></div>
+      <h3>Tier 0 + draft gates</h3>
+      <div id="gate-list"></div>
+      <h3>Corner histogram</h3>
+      <div id="corner-histogram"></div>
+      <h3>Existing calendar import</h3>
+      <select id="existing-track" aria-label="Existing calendar track"></select>
+      <div class="button-row"><button id="load-existing" type="button">Render &amp; validate</button></div>
+      <h3>TrackDefinition snippet</h3>
+      <textarea id="definition-output" readonly spellcheck="false"></textarea>
+      <h3>Generation artifact</h3>
+      <textarea id="artifact-output" readonly spellcheck="false"></textarea>
+      <h3>Import TrackDefinition JSON</h3>
+      <textarea id="import-input" spellcheck="false" placeholder="Paste a TrackDefinition JSON object"></textarea>
+      <div class="button-row"><button id="import-definition" type="button">Import definition</button></div>
+      <h3>Load CLI deep-validation artifact</h3>
+      <textarea id="deep-artifact-input" spellcheck="false" placeholder="Paste generation-artifact.json"></textarea>
+      <div class="button-row"><button id="load-artifact" type="button">Display CLI status</button></div>
+      <div id="deep-artifact-status" class="artifact-status">No CLI artifact loaded. Deep validation never runs in-browser.</div>
+    </section>
+  </main>
+</body>
+</html>

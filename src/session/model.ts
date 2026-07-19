@@ -1,6 +1,6 @@
 import type {
-  Car, CarInput, CarModifiers, LapTracker, LegacyCorner, PathMode, SampledPath,
-  SpeedProfile, Track
+  Car, CarInput, CornerLineKind, CornerLineTerminal, LaneSampleBuffer, LapTracker, LegacyCorner,
+  PathMode, SampledPath, SpeedProfile, Track, TrafficSlowPoint
 } from '../core/model';
 
 export type EntryState = 'none' | 'box' | 'grid' | 'run' | 'pitIn' | 'pit' | 'pitOut' | 'fin' | 'dnf';
@@ -23,8 +23,7 @@ export type PitWaitReason =
   | 'box-occupied'
   | 'same-team-queue'
   | 'ingress-reservation'
-  | 'egress-reservation'
-  | 'merge-traffic';
+  | 'egress-reservation';
 export type TyreCompound = 'S' | 'H' | 'W';
 export type PaceMode = 0 | 1 | 2;
 export type PartKey = 'e' | 'h' | 'c';
@@ -59,7 +58,55 @@ export interface PartValues { e: number; h: number; c: number }
 export interface PitArm { comp: TyreCompound; fix: boolean }
 export interface QualifyingRunPlan { at: number; hot: number }
 
-export interface PathPlanAnchor { index: number; offset: number }
+export interface LanePoint { s: number; eta: number }
+export interface LaneProgram {
+  points: LanePoint[];
+  reason: string;
+  /** Live authority identity; null only for the zero-state racing line. */
+  binding: string | null;
+  bias: number;
+  /** Emergency is carried only by a priced collision-avoidance program. */
+  surfaceAuthorization?: SurfaceAuthorization;
+}
+
+export interface EntryTrafficSlowPoint extends TrafficSlowPoint {
+  ownerCode: string;
+  reason: string;
+  /** Absolute track position of the compact longitudinal constraint. */
+  stationS: number;
+  /** Publication time, used only to account for one-epoch staleness. */
+  publishedAt: number;
+}
+
+/**
+ * The selected candidate's complete spatial speed authority. Progress is
+ * unwrapped, so the program remains ordered across the start/finish line.
+ */
+export interface RacecraftLongitudinalProgram {
+  progress: number[];
+  speed: number[];
+  /** Candidate-selected braking utilization used to author this speed law. */
+  brakingEffort: number;
+  slowPointOwnerCode: string | null;
+  /** Diagnostic provenance only; the full arrays are the authority. */
+  bindingSlowPoint: EntryTrafficSlowPoint | null;
+}
+
+export interface PathPlanAnchor {
+  index: number;
+  offset: number;
+  /** Native lane-program value; absent only for legacy absolute-offset edits. */
+  eta?: number;
+  /** Authored d(eta)/ds at this knot, when continuity survives reauthoring. */
+  etaFirstDerivative?: number;
+  /** Authored d2(eta)/ds2 at this knot, when continuity survives reauthoring. */
+  etaSecondDerivative?: number;
+  /** Exact unwrapped progress for native tow anchors; avoids index quantization. */
+  s?: number;
+}
+export type ManeuverTopology = 'hold' | 'left' | 'right' | 'brake';
+export type SurfaceAuthorization = 'normal' | 'emergency';
+export type EmergencyAuthorizationReason = 'collision-avoidance';
 export type DynamicPathMode = Exclude<PathMode, 'ideal' | 'pit'>;
 export type PathPlan =
   | { mode: 'ideal'; key: 'ideal' }
@@ -68,10 +115,301 @@ export type PathPlan =
       mode: DynamicPathMode;
       key: string;
       anchors: PathPlanAnchor[];
+      /** First anchor is the measured car position, not a future command. */
+      pinnedFirst?: boolean;
       cornerId?: string;
       complexId?: string | null;
-      corridor?: { minimum: number; maximum: number };
+      terminal?: 'ideal-rejoin';
+      topology?: ManeuverTopology;
+      surfaceAuthorization?: SurfaceAuthorization;
+      obstacleCode?: string;
+      emergencyReason?: EmergencyAuthorizationReason;
+      /** Attack-line provenance and the physical no-departure boundary. */
+      lineKind?: CornerLineKind;
+      /** Offline grid member selected inside the same tactical slot. */
+      lineTerminal?: CornerLineTerminal;
+      /** Analytic member of the ideal-to-alternate corner-line family. */
+      lineBlend?: number;
+      launchProgress?: number;
+      brakeIndex?: number;
+      leaderCode?: string;
     };
+
+export type ManeuverConstraint =
+  | 'non-finite'
+  | 'road-bound'
+  | 'controller-demand'
+  | 'predicted-hard-contact'
+  | 'protected-corridor'
+  | 'pit-reservation'
+  | 'surface-authorization'
+  | 'rejoin-occupied';
+
+export interface ManeuverCandidateDiagnostic {
+  id: string;
+  mode: PathMode;
+  topology?: ManeuverTopology;
+  surfaceAuthorization?: SurfaceAuthorization;
+  feasible: boolean;
+  rejections: ManeuverConstraint[];
+  conflictingReservation?: string;
+  controllerDemand: number;
+  roadExposure: number;
+  curbExposure: number;
+  grassExposure: number;
+}
+
+export type RacecraftCandidateKind =
+  | 'hold'
+  | 'ideal'
+  | 'recenter'
+  | 'corner-inside'
+  | 'corner-outside'
+  | 'brake-behind';
+export type RacecraftDirection = 'left' | 'hold' | 'right';
+export type RacecraftSpeedClass = 'free' | 'brake';
+
+export interface RacecraftCandidateSeed {
+  kind: RacecraftCandidateKind;
+  plan: PathPlan;
+  /** The one optional rival-derived terminal constraint. */
+  slowPointOwnerCode: string | null;
+}
+
+export interface RacecraftCandidateEvaluation {
+  kind: RacecraftCandidateKind;
+  plan: PathPlan;
+  feasible: boolean;
+  vetoes: string[];
+  targetLateral: number;
+  slowPointOwnerCode: string | null;
+  /** Binding station already selected by the candidate's backward sweep. */
+  slowPoint: EntryTrafficSlowPoint | null;
+  interactionCause: RacecraftInteractionCause;
+  /** Exact objective decomposition, all in seconds. */
+  ownTimeSeconds: number;
+  billSeconds: number;
+  recourseSeconds: number;
+  proximitySeconds: number;
+  positionValueSeconds: number;
+  attemptLossSeconds: number;
+  battleSpendSeconds: number;
+  effortRiskSeconds: number;
+  /** True when the authored side family reverses centre order by its rejoin. */
+  positionGain: boolean;
+  /** Minimum signed four-circle body clearance over screened rival sweeps. */
+  minimumPlannedClearanceMetres: number | null;
+  tieBandSeconds: number;
+  hazardCount: number;
+  switchChanged: boolean;
+  /** Candidate-selected braking utilization; side/attack families use capability. */
+  brakingEffort: number;
+  gripUtilization: number;
+  direction: RacecraftDirection;
+  speedClass: RacecraftSpeedClass;
+  cost: number;
+}
+
+export type RacecraftDecisionCertificateBreakReason =
+  | 'bootstrap'
+  | 'neighbor-set'
+  | 'claim-revision'
+  | 'authority'
+  | 'expiry';
+export type RacecraftClaimRevisionReason =
+  | 'prediction-source'
+  | 'prediction-family'
+  | 'point-divergence';
+
+/**
+ * Proof that the standing argmin remains usable until one exact input changes.
+ * The selected-family identity is semantic: it excludes path object identity,
+ * current progress, sampled indices, and the measured acquisition anchor.
+ */
+export interface RacecraftDecisionCertificate {
+  selectedFamilyId: string | null;
+  neighborCodes: string[];
+  claimRevisions: Record<string, number>;
+  authorityKey: string;
+  validUntil: number;
+  zeroHazardIdeal: boolean;
+}
+
+export interface RacecraftDecisionEconomics {
+  rivalCode: string;
+  role: 'attack' | 'defense';
+  opportunityPresent: boolean;
+  paceDifferentialSecondsPerLap: number;
+  reopportunitySeconds: number;
+  positionValueSeconds: number;
+}
+
+export interface RacecraftDecision {
+  at: number;
+  selectedKind: RacecraftCandidateKind | null;
+  selectedPlanKey: string | null;
+  candidateCount: number;
+  targetLateral: number;
+  interactionCause: RacecraftInteractionCause | null;
+  chosenUtilization: number;
+  selectedLongitudinalProgram: RacecraftLongitudinalProgram | null;
+  economics: RacecraftDecisionEconomics[];
+  certificate: RacecraftDecisionCertificate;
+  candidates: RacecraftCandidateEvaluation[];
+}
+
+/** Bounded work counters for Tier-1 micro-attribution. */
+export interface RacecraftEvaluatorWorkDiagnostics {
+  decisionCalls: number;
+  candidateFamilyBuilds: number;
+  candidateSeedsBuilt: number;
+  seedEvaluations: number;
+  speedLawSamples: number;
+  terminalContinuationCalls: number;
+  terminalContinuationSteps: number;
+  hazardsBuilt: number;
+  boundScreenCalls: number;
+  boundScreenClears: number;
+  boundScreenHits: number;
+  viabilityCalls: number;
+  viabilityHazards: number;
+  deterministicSweeps: number;
+  arrivalFamilyBuilds: number;
+  arrivalFamilyCacheHits: number;
+  tieBandHazardEvaluations: number;
+}
+
+export interface RacecraftClaimStation {
+  index: number;
+  time: number;
+  s: number;
+  speed: number;
+  centre: number;
+  /** Predicted body orientation relative to the local track tangent. */
+  headingOffsetRadians: number;
+}
+
+export type RacecraftPredictionSource =
+  | 'published'
+  | 'rederived'
+  | 'ballistic';
+
+export interface RacecraftTrackingErrorScale {
+  /** Measured lateral scale used for publication detection and β. */
+  lateralThresholdMetres: number;
+  /** Measured longitudinal scale used only for publication detection. */
+  longitudinalThresholdMetres: number;
+}
+
+export interface RacecraftPublicationDetectionState {
+  /** Actual installed authority generations, never decision epochs. */
+  lateralAuthorityRevision: number;
+  longitudinalAuthorityRevision: number;
+  /** Detection scale frozen for this authority generation. */
+  scale: RacecraftTrackingErrorScale;
+  /** A contradicted publication cannot become true again in this generation. */
+  rejected: boolean;
+}
+
+export interface RacecraftClaim {
+  code: string;
+  source: RacecraftPredictionSource;
+  /** Stable selected-program identity for one publication epoch. */
+  predictionKey: string;
+  /** Exact installed lateral authority; -1 for a derived/ballistic source. */
+  lateralAuthorityRevision: number;
+  /** Exact installed speed authority; -1 for a derived/ballistic source. */
+  longitudinalAuthorityRevision: number;
+  /**
+   * Advances only when re-publication diverges detectably from the
+   * predecessor's aged point trajectory.
+   */
+  publicationRevision: number;
+  publishedAt: number;
+  originS: number;
+  originCentre: number;
+  originSpeed: number;
+  /** Measured body orientation relative to the local track tangent. */
+  originHeadingOffsetRadians: number;
+  trusted: boolean;
+  /** ε: measured tracking error, legal only for detection and β. */
+  lateralTrackingErrorThresholdMetres: number;
+  longitudinalTrackingErrorThresholdMetres: number;
+  trackingErrorMetres: number;
+  stations: RacecraftClaimStation[];
+}
+
+export interface RacecraftSideAgreement {
+  /** Side occupied by the lexicographically first code in the pair key. */
+  side: -1 | 1;
+  /** Acquired separator in ideal-line-relative lateral coordinates. */
+  separatorEta: number;
+  /** Required centre separation from sporting body geometry. */
+  centreClearance: number;
+  /** Proven normal-surface family authority for the active track context. */
+  familyCertificate: RacecraftSideAgreementFamilyCertificate;
+  /** Acquisition time; release occurs when the physical bodies are clear. */
+  since: number;
+}
+
+export interface RacecraftSideAgreementFamilyCertificate {
+  contextKey: string;
+  originS: number;
+  spanMetres: number;
+  lowerFamilyKey: string;
+  upperFamilyKey: string;
+}
+
+export type RacecraftInteractionCause =
+  | 'ordinary'
+  | 'draft'
+  | 'blue-flag'
+  | 'qualifying'
+  | 'damage';
+
+export interface RacecraftDecisionLogCandidate {
+  kind: RacecraftCandidateKind;
+  planKey: string;
+  stableFamilyId: string;
+  feasible: boolean;
+  vetoes: string[];
+  direction: RacecraftDirection;
+  speedClass: RacecraftSpeedClass;
+  ownTimeSeconds: number;
+  billSeconds: number;
+  recourseSeconds: number;
+  proximitySeconds: number;
+  positionValueSeconds: number;
+  attemptLossSeconds: number;
+  battleSpendSeconds: number;
+  effortRiskSeconds: number;
+  positionGain: boolean;
+  minimumPlannedClearanceMetres: number | null;
+  tieBandSeconds: number;
+  hazardCount: number;
+  switchChanged: boolean;
+  cost: number;
+}
+
+export interface RacecraftDecisionLogEntry {
+  at: number;
+  code: string;
+  laneProgramReason: string;
+  laneProgramBinding: string | null;
+  selectedKind: RacecraftCandidateKind | null;
+  selectedPlanKey: string | null;
+  economics: RacecraftDecisionEconomics[];
+  candidates: RacecraftDecisionLogCandidate[];
+}
+
+export interface UnexplainedStallRecord {
+  code: string;
+  at: number;
+  duration: number;
+  progress: number;
+  speed: number;
+  pathMode: PathMode;
+}
 
 export interface SideBySidePair {
   t0: number;
@@ -82,6 +420,38 @@ export interface SideBySidePair {
 }
 
 export interface SideBySideEpisode { t: number; contact: boolean; reason: string }
+export interface AttackEpisode {
+  key: string;
+  attacker: string;
+  target: string;
+  startedAt: number;
+  expiresAt: number;
+  cornerId: string;
+  /** Pair pace evidence frozen at initiation for outcome correlation only. */
+  paceDifferentialSecondsPerLap: number | null;
+}
+
+export interface AttackPaceOutcomeMoments {
+  samples: number;
+  sumPace: number;
+  sumOutcome: number;
+  sumPaceSquared: number;
+  sumOutcomeSquared: number;
+  sumProduct: number;
+}
+
+export interface CornerPassCount { attempts: number; passes: number }
+export interface StationGapDistribution {
+  samples: number;
+  sumMetres: number;
+  squaredSumMetres: number;
+  minimumMetres: number;
+  maximumMetres: number;
+}
+export interface RacecraftCornerDecisionCount {
+  inline: number;
+  offset: number;
+}
 export interface LegacyRoomPair {
   seen?: number;
   cornerApex?: number;
@@ -98,8 +468,14 @@ export interface HitPairMetric {
   sumImp: number;
   sumSep: number;
   sumDs: number;
-  first: number;
-  last: number;
+  /** Duration of the current run of collision-producing physics steps. */
+  continuousContactSeconds: number;
+  /** Longest collision-producing run observed for this pair. */
+  maximumContinuousContactSeconds: number;
+  /** Session-local collision invocation that most recently produced contact. */
+  lastContactStep: number;
+  /** Number of disjoint contact runs for this pair. */
+  contactEpisodes: number;
 }
 
 export interface HitSample {
@@ -129,8 +505,6 @@ export interface HitSample {
   slipB: number;
   brakeA: number;
   brakeB: number;
-  capA: number;
-  capB: number;
   liftA: number;
   liftB: number;
   recA: number;
@@ -177,38 +551,28 @@ export interface Entry {
   pitW: number | null;
   stops: number;
   lat: number;
-  latTgt: number;
   gridLat: number;
-  vCap: number;
-  trafCap: number;
+  trafficSlowPoint: EntryTrafficSlowPoint | null;
+  racecraftLongitudinalProgram: RacecraftLongitudinalProgram | null;
   liftT: number;
-  yieldT: number;
-  atkT: number;
-  atkSide: number;
-  atkCorner: number;
-  atkCd: number;
-  atkSeq: number;
-  closeT: number;
-  defT: number;
-  defCorner: number;
-  defAbs: number;
-  concedeT: number;
-  concedeV: number;
-  tuckT: number;
   tow: number;
-  lungeT: number;
+  dirtyT: number;
+  pressureT: number;
+  underPressure: boolean;
+  brakingEffort: number;
+  brakingPrudenceOffset: number;
   recT: number;
   avoidT: number;
   _avoidWith: string;
   _avoidSide: number;
-  _roomWith: string;
-  _tuckWith: string;
-  _tuckCorner: number;
-  _lungeRoll: number;
+  _alongsideWith: string;
   mistT: number;
   battle: boolean;
+  _battleLapSeconds: number;
+  _recentCleanLap: number;
   focusNow: number;
   flow: number[] | null;
+  lineBiasByCorner: Record<string, number> | null;
   lapLive: boolean;
   lapPhase?: QualifyingLapPhase;
   hotLeft: number;
@@ -222,15 +586,59 @@ export interface Entry {
   gridP: number;
   inp: CarInput;
   botTick: number;
+  laneProgram: LaneProgram;
+  laneBuffer?: LaneSampleBuffer;
   path?: SampledPath;
-  pathMode?: PathMode;
-  pathPlan?: PathPlan;
+  pathMode?: 'ideal' | 'pit';
+  pathPlan?: Extract<PathPlan, { mode: 'pit' }>;
+  /** Exact evaluator-selected analytic authority executed at traffic cadence. */
+  racecraftPathPlan?: Exclude<
+    PathPlan,
+    { mode: 'ideal' } | { mode: 'pit' }
+  >;
   pathBuildN?: number;
-  pathModeSince?: number;
-  pathModeTime?: Partial<Record<PathMode, number>>;
   pathMaxSlew?: number;
+  laneTargetDiscontinuityMetres?: number;
+  laneTargetDiscontinuities?: number;
+  laneTargetNonManeuverDiscontinuities?: number;
+  laneDiscontinuityReasons?: Record<string, number>;
+  laneEdits?: number;
+  laneEditReasons?: Record<string, number>;
+  _laneBufferRevision?: number;
+  _laneTargetAbsolute?: number;
+  laneMaximumPinError?: number;
+  laneUnpinnedEdits?: number;
+  racecraftDecision?: RacecraftDecision;
+  /**
+   * Winning family held between deliberations while publication is re-derived.
+   * Stations are never cached: each claim re-anchors this family to measurement.
+   */
+  _racecraftRederivedProgram?: {
+    kind: RacecraftCandidateKind;
+    plan: PathPlan;
+    slowPointOwnerCode: string | null;
+    absorbedDecisionAt: number;
+  };
+  _racecraftLoggedAt?: number;
+  _racecraftAppliedKind?: RacecraftCandidateKind;
+  _racecraftAppliedAt?: number;
+  _racecraftLateralAuthorityRevision?: number;
+  _racecraftLongitudinalAuthorityRevision?: number;
+  _racecraftPublicationDetection?: RacecraftPublicationDetectionState;
+  racecraftClaim?: RacecraftClaim;
+  _racecraftClaimWrite?: RacecraftClaim;
+  _racecraftLastPublicationRevision?: number;
+  claimLateralTrackingErrorThresholdMetres?: number;
+  claimLongitudinalTrackingErrorThresholdMetres?: number;
+  claimTrackingErrorMetres?: number;
+  claimTrackingErrorScaleBySource?: Partial<
+    Record<RacecraftPredictionSource, RacecraftTrackingErrorScale>
+  >;
+  stationarySince?: number;
+  stationaryDuration?: number;
+  stationaryCause?: string | null;
+  unexplainedStallAt?: number;
   _mishap?: boolean;
-  _pitMergeCommitted?: boolean;
   pitPhase?: PitPhase;
   pitReservationKey?: string;
   pitQueueW?: number | null;
@@ -241,15 +649,28 @@ export interface Entry {
   pitProgressPhase?: PitPhase;
   pitDeadlockAt?: number;
   _prw?: [number, number] | null;
-  _roomActive?: boolean;
   _defMoveKey?: string;
+  _defenseCanaryLaneEdits?: number;
   _defSeenKey?: string;
+  _defSeenAttackers?: Record<string, boolean>;
+  _defendingAgainst?: string;
+  _previousTrafficLateral?: number;
+  _trafficLateralVelocity?: number;
+  _previousTrafficIndex?: number;
+  _trafficIndex?: number;
+  _trafficRoadHeading?: number;
+  _trafficProjectedHalfExtent?: number;
+  _trafficProjectedHalfExtentIndex?: number;
+  _trafficProjectedHalfExtentHeading?: number;
+  _pairKeys?: Record<string, string>;
+  _closingWith?: string;
+  _closingDistance?: number;
+  _trafficClosingVelocity?: number;
   _hitT?: number;
   _bestCps?: number[] | undefined;
   _curCps?: number[];
   _cpSeen?: number;
   _dLive?: number | null;
-  priorityYield?: PriorityYield;
   pitWaitReason?: PitWaitReason | null;
   pitTrafficLeader?: string | null;
 }
@@ -327,46 +748,91 @@ interface SessionBase {
   hitHardCorner?: number;
   hitMax?: number;
   hitPairs?: Record<string, HitPairMetric>;
+  _contactStep?: number;
   hitSamples?: HitSample[];
-  concedeN?: number;
-  concedeSoftN?: number;
   sbsT?: number;
   sbsPairs?: Record<string, SideBySidePair>;
   sbsEpisodes?: SideBySideEpisode[];
   _sbsStamp?: number;
   roomPairs?: Record<string, LegacyRoomPair>;
   _roomStamp?: number;
-  tuckFailN?: number;
-  tuckExitN?: number;
-  lungeN?: number;
-  lockupN?: number;
+  utilizationMistakes?: number;
   defMoveN?: number;
   defRepeatN?: number;
+  defBlockedN?: number;
+  switchbackN?: number;
+  switchbackCompletions?: number;
+  brakeWhileAlongsideN?: number;
+  rearLossStraightN?: number;
+  defenseMoveInBrakingN?: number;
+  defenseMirrorN?: number;
+  cornerPassCounts?: Record<string, CornerPassCount>;
+  racecraftCornerDecisions?: Record<string, RacecraftCornerDecisionCount>;
+  battleLapDeltaSum?: number;
+  battleLapReferenceSum?: number;
+  battleLapSamples?: number;
+  stationGapDistribution?: StationGapDistribution;
+  attackInitiations?: number;
+  attackCompletions?: number;
+  attackEpisodes?: Map<string, AttackEpisode>;
+  attackPaceOutcomeMoments?: AttackPaceOutcomeMoments;
   pitReservations?: Map<string, PitReservation>;
   pitDeadlocks?: PitDeadlockRecord[];
   pitForeignFalseLeaders?: number;
   pitUnintendedWait?: number;
-  priorityRecords?: Map<string, PriorityRecord>;
-  priorityHistory?: PriorityHistory[];
-  priorityActivations?: number;
-  blueFlagActivations?: number;
-  qualifyingPriorityActivations?: number;
-  priorityLateDetections?: number;
-  priorityObstructionTime?: number;
-  priorityIllegalDecisions?: number;
-  priorityHandoffs?: number;
-  priorityPathCrossings?: number;
-  priorityMaximumQueue?: number;
-  cornerRights?: Map<string, CornerRightsRecord>;
-  cornerRightsHistory?: CornerRightsHistory[];
-  cornerRightsAssignments?: Map<string, CornerCorridorAssignment>;
-  cornerRightsStamp?: number;
-  cornerRightsAcquisitions?: number;
-  cornerRightsReleases?: number;
-  cornerRightsHandoffs?: number;
-  cornerRightsViolations?: number;
-  cornerRightsThreeCarFallbacks?: number;
-  cornerRightsMinimumSeparation?: number;
+  racecraftRejectedCandidates?: number;
+  racecraftRejectedByConstraint?: Record<string, number>;
+  racecraftCandidatesEvaluated?: number;
+  racecraftMaximumCandidates?: number;
+  racecraftPathsMaterialized?: number;
+  racecraftDecisionLogging?: boolean;
+  racecraftDecisionLog?: RacecraftDecisionLogEntry[];
+  racecraftDecisionLogCursor?: number;
+  racecraftDecisionLogDropped?: number;
+  racecraftDecisionTick?: number;
+  racecraftDecisionSamples?: number;
+  racecraftDecisionSwitches?: number;
+  racecraftTier0Checks?: number;
+  racecraftTier0Accepted?: number;
+  racecraftTier0IdealDominance?: number;
+  racecraftTier0BetaRechecks?: number;
+  racecraftTier0BetaAccepts?: number;
+  racecraftTier0BetaBreaks?: number;
+  racecraftTier1Deliberations?: number;
+  racecraftOffHorizonContests?: number;
+  racecraftOffHorizonMaximumContactTimeSeconds?: number;
+  racecraftEvaluatorWork?: RacecraftEvaluatorWorkDiagnostics;
+  racecraftCertificateBreaks?: Partial<
+    Record<RacecraftDecisionCertificateBreakReason, number>
+  >;
+  racecraftClaimRevisionReasons?: Partial<
+    Record<RacecraftClaimRevisionReason, number>
+  >;
+  racecraftClaims?: ReadonlyMap<string, RacecraftClaim>;
+  _racecraftClaimMapWrite?: Map<string, RacecraftClaim>;
+  sideAgreements?: Map<string, RacecraftSideAgreement>;
+  racecraftClaimTick?: number;
+  racecraftAgreementGeometryViolations?: number;
+  racecraftAgreementFamilyCertificateFailures?: number;
+  racecraftAgreementFamilyCertificateFailuresByContext?: Record<string, number>;
+  racecraftAgreementFamilyRepositions?: number;
+  racecraftAgreementDaylightMetresSum?: number;
+  racecraftAgreementDaylightSamples?: number;
+  racecraftAgreementDaylightMinimumMetres?: number;
+  _racecraftAgreementCertificateFailureContexts?: Map<string, string>;
+  racecraftClaimUntrustedSamples?: number;
+  racecraftReactionEvents?: number;
+  racecraftEmergencyLifts?: number;
+  racecraftInteractionSamples?: Partial<Record<RacecraftInteractionCause, number>>;
+  racecraftLiftSamples?: Partial<Record<RacecraftInteractionCause, number>>;
+  racecraftBlueForcedSpanSamples?: number;
+  racecraftBlueForcedLiftSamples?: number;
+  racecraftBlueLiftOutsideForcedSpan?: number;
+  racecraftExpiredPrograms?: number;
+  racecraftWanderingSeconds?: number;
+  _racecraftDefensePairs?: Set<string>;
+  _trafficActiveEntries?: Entry[];
+  unexplainedStalls?: UnexplainedStallRecord[];
   completionQueued?: boolean;
   pendingTuningLearn?: number;
 }
@@ -418,99 +884,4 @@ export interface PitDeadlockRecord {
   owner: string | null;
 }
 
-export type PriorityReason = 'blue-flag' | 'qualifying';
-export interface PriorityYield { reason: PriorityReason; beneficiary: string }
-export interface PriorityRecord {
-  key: string;
-  reason: PriorityReason;
-  beneficiary: Entry;
-  yielding: Entry;
-  acquiredAt: number;
-  lastSeenAt: number;
-  lastGap: number;
-  filteredClosing: number;
-  closingAge: number;
-  timeToCatch: number;
-  yieldSide: number;
-  detectedPhase: 'straight' | 'approach' | 'corner' | 'pit-entry';
-  holdUntilI: number | null;
-  clearFor: number;
-  minimumGap: number;
-  maximumGap: number;
-  obstructionTime: number;
-  pathCrossings: number;
-  lastLateralOrder: number;
-  suppressionApplied: boolean;
-  illegalDecisionActive: boolean;
-}
-export interface PriorityHistory {
-  key: string;
-  reason: PriorityReason;
-  release: string;
-  duration: number;
-  maximumGap: number;
-  minimumGap?: number;
-  detectedPhase?: PriorityRecord['detectedPhase'];
-  obstructionTime?: number;
-  pathCrossings?: number;
-}
-
 export interface EntryStepCallbacks { onLine(entry: Entry, session: Session, valid: boolean): void }
-
-export interface RacecraftPathState { mode: PathMode; path: SampledPath }
-export interface CornerRightsRecord {
-  key: string;
-  cornerId: string;
-  complexId: string | null;
-  inside: Entry;
-  outside: Entry;
-  insideCode: string;
-  outsideCode: string;
-  attackerCode: string | null;
-  defenderCode: string | null;
-  acquiredAt: number;
-  acquiredPhase: 'approach' | 'brake' | 'turn-in';
-  insideTarget: number;
-  outsideTarget: number;
-  requiredSeparation: number;
-  corridorCenter?: number;
-  insideCorridorMinimum?: number;
-  insideCorridorMaximum?: number;
-  outsideCorridorMinimum?: number;
-  outsideCorridorMaximum?: number;
-  previousInsideLateral?: number;
-  previousOutsideLateral?: number;
-  previousSeparation?: number;
-  closingRate?: number;
-  predictedSeparation?: number;
-  minimumSeparation?: number;
-  violationCount?: number;
-  violationActive?: boolean;
-  handoffs?: number;
-  defenseCancelled?: boolean;
-  lastSeenStamp: number;
-  clearFor: number;
-}
-export interface CornerCorridorAssignment {
-  entry: Entry;
-  code: string;
-  cornerId: string;
-  role: 'inside' | 'middle' | 'outside';
-  target: number;
-  minimum: number;
-  maximum: number;
-}
-export interface CornerRightsHistory {
-  key: string;
-  cornerId: string;
-  acquiredAt: number;
-  releasedAt: number;
-  release: string;
-  minimumSeparation?: number;
-  violations?: number;
-  handoffs?: number;
-}
-
-export function carModifiers(entry: Entry): CarModifiers {
-  return { pw: entry.mods.pw, mu: entry.mods.hMu, dr: entry.mods.dr };
-}

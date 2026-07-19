@@ -24,7 +24,14 @@
       "Bash(grep -n \"^\\(function\\\\|^if \\(typeof window\\\\|\\(function\\(\\){$\\\\|^}\\)\\(\\);\\\\s*$\" golden-lap.html)",
       "Bash(node *)",
       "Bash(NODE_PATH=/home/marcelo/node_modules node *)",
-      "Bash(xargs -d '\\\\n' jq -r 'select\\(.type==\"assistant\"\\) | .message.content[]? | select\\(.type==\"tool_use\"\\) | if .name==\"Bash\" then \"BASH\\\\t\" + \\(\\(.input.command // \"\"\\) | gsub\\(\"\\\\n\";\" \"\\) | .[0:80]\\) else \"TOOL\\\\t\" + .name end')"
+      "Bash(xargs -d '\\\\n' jq -r 'select\\(.type==\"assistant\"\\) | .message.content[]? | select\\(.type==\"tool_use\"\\) | if .name==\"Bash\" then \"BASH\\\\t\" + \\(\\(.input.command // \"\"\\) | gsub\\(\"\\\\n\";\" \"\\) | .[0:80]\\) else \"TOOL\\\\t\" + .name end')",
+      "Bash(python3 *)",
+      "Bash(bun tools/simulate-headless.ts --help)",
+      "Bash(git -C /home/marcelo/code/goldenlap status --porcelain)",
+      "Bash(git -C /home/marcelo/code/goldenlap log --oneline)",
+      "Bash(bun run *)",
+      "Bash(bun -e ' *)",
+      "Bash(bun *)"
     ]
   }
 }

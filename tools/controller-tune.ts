@@ -80,7 +80,7 @@ function simulate(prepared: PreparedTrack, tuning: PathFollowerTuning): { maximu
       path,
       pathTuning: tuning
     });
-    stepCar(car, input, surface, 1 / 120, { pw: 1, mu: 1, dr: 1 });
+    stepCar(car, input, surface, 1 / 120, { pw: 1, mu: 1, dr: 1, df: 1 });
     if (surface.zone === 'grass') grass++;
   }
   return { maximum: Math.max(...best.map(marker => marker.error)), grass };

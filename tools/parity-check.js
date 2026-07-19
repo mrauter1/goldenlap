@@ -3,12 +3,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./lib/browser');
 
 const ROOT = path.resolve(__dirname, '..');
-const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'parity', 'manifest.json');
+const HISTORICAL_FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'parity', 'manifest.json');
+const PIVOT_FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'parity', 'runtime-pivot.json');
 const args = process.argv.slice(2);
 const capture = args.includes('--capture');
+const historical = args.includes('--historical');
+const fixture = historical ? HISTORICAL_FIXTURE : PIVOT_FIXTURE;
 const targetArg = args.find(arg => !arg.startsWith('--'));
 const target = path.resolve(ROOT, targetArg || 'index.html');
 const seed = 0x51A7E;
@@ -51,7 +54,7 @@ function differences(expected, actual, at = '$', out = []) {
 
 async function snapshot() {
   const errors = [];
-  const browser = await chromium.launch();
+  const browser = await launchBrowser();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   page.on('pageerror', error => errors.push(`page: ${error}`));
   page.on('console', message => {
@@ -148,7 +151,9 @@ async function snapshot() {
       wet: round(live.wet),
       entryHash: hash(live.entries.flatMap(entry => [
         entry.di, entry.state, round(entry.prog || 0), round(entry.spd || 0),
-        round(entry.lat || 0), round(entry.latTgt || 0), round(entry.vCap || 0),
+        round(entry.lat || 0),
+        round(entry.laneProgram?.points?.at(-1)?.eta ??
+          entry.laneProgram?.bias ?? 0),
         entry.car ? round(entry.car.x) : null,
         entry.car ? round(entry.car.y) : null,
         entry.car ? round(entry.car.vx) : null
@@ -190,15 +195,15 @@ async function snapshot() {
     process.stdout.write(`${JSON.stringify(actual, null, 2)}\n`);
     return;
   }
-  if (!fs.existsSync(FIXTURE)) throw new Error(`Missing parity fixture: ${FIXTURE}`);
-  const expected = stable(JSON.parse(fs.readFileSync(FIXTURE, 'utf8')).runtime);
+  if (!fs.existsSync(fixture)) throw new Error(`Missing parity fixture: ${fixture}`);
+  const expected = stable(JSON.parse(fs.readFileSync(fixture, 'utf8')).runtime);
   const diff = differences(expected, actual);
   if (diff.length) {
     console.error(`Parity mismatch (${diff.length} differences):`);
     diff.slice(0, 80).forEach(line => console.error(`- ${line}`));
     process.exitCode = 1;
   } else {
-    console.log(`Parity OK: ${path.relative(ROOT, target)} matches ${path.relative(ROOT, FIXTURE)}`);
+    console.log(`Parity OK: ${path.relative(ROOT, target)} matches ${path.relative(ROOT, fixture)}`);
   }
 })().catch(error => {
   console.error(error && error.stack || error);

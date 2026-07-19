@@ -57,7 +57,7 @@ function simulate(track: Track, path: SampledPath, markers: Marker[], lapTime: n
       }
     }
     const input = botStep(track, profile, car, { margin: 0.95, muScale: 1, path });
-    stepCar(car, input, surface, 1 / 120, { pw: 1, mu: 1, dr: 1 });
+    stepCar(car, input, surface, 1 / 120, { pw: 1, mu: 1, dr: 1, df: 1 });
     if (surface.zone === 'grass') grass++;
   }
   return {

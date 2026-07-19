@@ -1,5 +1,6 @@
-import { collideCars } from '../core/collision';
+import { collideCars, isHardContactImpulse } from '../core/collision';
 import { clamp, normAng } from '../shared/math';
+import { random } from '../shared/rng';
 import { damagePart, lapWear } from './incidents';
 import { launchFromPit, stepEntry } from './entry';
 import { rivalPitAI } from './pit';
@@ -7,8 +8,8 @@ import { emitHudDirty, emitSessionEvent, emitToast, requestTuningPoint } from '.
 import {
   unstableCar, updateTraffic
 } from './racecraft/traffic';
-import { roomPairKey } from './racecraft/corner-rights';
-import { targetAbsLat } from './racecraft/paths';
+import { roomPairKey } from './racecraft/geometry';
+import { setTargetAbsLat, targetAbsLat } from './racecraft/paths';
 import { formatSessionTime, rollFocus, TRAF_DT } from './strategy';
 import type { Car } from '../core/model';
 import type {
@@ -50,13 +51,13 @@ export function onLine(entry: Entry, session: Session, valid: boolean): void {
   entry.cross++;
   const lapTime = entry.lineT >= 0 ? session.t - entry.lineT : 0;
   entry.lineT = session.t;
-  rollFocus(entry);
+  rollFocus(entry, session.trk);
   if (session.mode === 'quali') {
     const wasFlying = entry.lapPhase === 'flying' || entry.lapLive;
     if (wasFlying && lapTime > 0) {
       entry.lastLap = lapTime;
       if (valid) {
-        if (entry.isPlayer && Math.random() < 0.35 && requestTuningPoint(session))
+        if (entry.isPlayer && random() < 0.35 && requestTuningPoint(session))
           emitToast(session, 'The crew learned something — +1 tuning point', 'info');
         if (lapTime < entry.best) {
           entry.best = lapTime;
@@ -88,6 +89,18 @@ export function onLine(entry: Entry, session: Session, valid: boolean): void {
   if (entry.cross >= 2) {
     if (lapTime > 0) entry.lastLap = lapTime;
     if (valid && lapTime > 0 && lapTime < entry.best) entry.best = lapTime;
+    if (valid && lapTime > 0) {
+      if (entry._battleLapSeconds > 0 && entry._recentCleanLap > 0) {
+        session.battleLapDeltaSum = (session.battleLapDeltaSum ?? 0) +
+          (lapTime - entry._recentCleanLap);
+        session.battleLapReferenceSum = (session.battleLapReferenceSum ?? 0) +
+          entry._recentCleanLap;
+        session.battleLapSamples = (session.battleLapSamples ?? 0) + 1;
+      } else if (entry._battleLapSeconds <= 0) {
+        entry._recentCleanLap = lapTime;
+      }
+    }
+    entry._battleLapSeconds = 0;
     lapWear(entry, session);
     if (entry.state === 'dnf') return;
     rivalPitAI(entry, session);
@@ -168,11 +181,11 @@ export function stepSession(
   }
 
   session.trafT -= step;
-  if (session.trafT <= 0) {
-    session.trafT = TRAF_DT;
+  while (session.trafT <= 0) {
+    session.trafT += TRAF_DT;
     updateTraffic(session);
   }
-  processCollisions(session, collisionEntries);
+  processCollisions(session, collisionEntries, step);
   finishRaceIfReady(session);
 }
 
@@ -223,7 +236,40 @@ function stepQualifyingFlow(session: QualifyingSession): void {
   }
 }
 
-function processCollisions(session: Session, entries: ActiveEntry[]): void {
+export function requiresContactRecovery(
+  hardContact: boolean,
+  firstUnstable: boolean,
+  secondUnstable: boolean
+): boolean {
+  return hardContact || firstUnstable || secondUnstable;
+}
+
+export function recordContinuousContactStep(
+  pair: HitPairMetric,
+  contactStep: number,
+  stepSeconds: number
+): void {
+  if (pair.lastContactStep === contactStep) return;
+  if (pair.lastContactStep !== contactStep - 1)
+    pair.contactEpisodes++;
+  pair.continuousContactSeconds =
+    pair.lastContactStep === contactStep - 1
+      ? pair.continuousContactSeconds + stepSeconds
+      : stepSeconds;
+  pair.maximumContinuousContactSeconds = Math.max(
+    pair.maximumContinuousContactSeconds,
+    pair.continuousContactSeconds
+  );
+  pair.lastContactStep = contactStep;
+}
+
+function processCollisions(
+  session: Session,
+  entries: ActiveEntry[],
+  stepSeconds: number
+): void {
+  const contactStep = (session._contactStep ?? 0) + 1;
+  session._contactStep = contactStep;
   const impacts = collideCars(entries.map(entry => entry.car));
   for (const impact of impacts) {
     const first = entries[impact.i]!;
@@ -241,10 +287,13 @@ function processCollisions(session: Session, entries: ActiveEntry[]): void {
       sumImp: 0,
       sumSep: 0,
       sumDs: 0,
-      first: session.t,
-      last: session.t
+      continuousContactSeconds: 0,
+      maximumContinuousContactSeconds: 0,
+      lastContactStep: -1,
+      contactEpisodes: 0
     });
     const separation = Math.abs(first.latNow - second.latNow);
+    const hardContact = isHardContactImpulse(impact.imp);
     const forward = (second.car.s - first.car.s + session.trk.len) % session.trk.len;
     const longitudinal = Math.min(forward, session.trk.len - forward);
     pair.n++;
@@ -252,15 +301,22 @@ function processCollisions(session: Session, entries: ActiveEntry[]): void {
     pair.sumImp += impact.imp;
     pair.sumSep += separation;
     pair.sumDs += longitudinal;
-    pair.last = session.t;
+    recordContinuousContactStep(pair, contactStep, stepSeconds);
     if (separation > 1.8) pair.side++;
     const roomKey = roomPairKey(first, second);
     if (session.roomPairs?.[roomKey]) pair.room++;
-    if (impact.imp > 8) pair.hard++;
+    if (hardContact) {
+      pair.hard++;
+    }
     if (separation > 1.8) session.hitSide = (session.hitSide || 0) + 1;
     else session.hitRear = (session.hitRear || 0) + 1;
 
-    if (separation >= 1.1 && longitudinal < 4.5) {
+    const recoveryContact = requiresContactRecovery(
+      hardContact,
+      unstableCar(session.trk, first),
+      unstableCar(session.trk, second)
+    );
+    if (recoveryContact && separation >= 1.1 && longitudinal < 4.5) {
       const roomPairs = session.roomPairs ??
         (session.roomPairs = Object.create(null) as NonNullable<Session['roomPairs']>);
       const hitRoom = roomPairs[roomKey] ?? {};
@@ -269,35 +325,29 @@ function processCollisions(session: Session, entries: ActiveEntry[]): void {
       roomPairs[roomKey] = hitRoom;
     }
 
-    if (impact.imp > 8) recordHardImpact(session, first, second, impact.imp, separation, roomKey);
+    if (hardContact)
+      recordHardImpact(session, first, second, impact.imp, separation, roomKey);
     first._hitT = second._hitT = session.t;
     const sideBySide = session.sbsPairs?.[hitKey];
     if (sideBySide) sideBySide.contact = true;
 
-    if (impact.imp >= 2) {
+    if (hardContact) {
       first.stress = clamp(first.stress + impact.imp * 0.012, 0, 1);
       second.stress = clamp(second.stress + impact.imp * 0.012, 0, 1);
-    }
-    if (impact.imp >= 4) {
-      const behind = forward < session.trk.len / 2 ? first : second;
-      behind.concedeT = Math.max(behind.concedeT, clamp(impact.imp * 0.08, 0.3, 1.5));
-      behind.concedeV = Math.max(8, behind.spd - 2);
-      session.concedeN = (session.concedeN || 0) + 1;
-      if (impact.imp < 4) session.concedeSoftN = (session.concedeSoftN || 0) + 1;
     }
     if (impact.imp > 5) {
       const cameraEntry = session.entries[session.camI];
       if (cameraEntry?.car &&
           Math.hypot(cameraEntry.car.x - first.car.x, cameraEntry.car.y - first.car.y) < 160)
         emitSessionEvent(session, { type: 'audio', cue: 'thud', strength: impact.imp / 20 });
-      if ((first.isPlayer || second.isPlayer) && impact.imp > 8)
+      if ((first.isPlayer || second.isPlayer) && hardContact)
         emitToast(session, `${first.code} and ${second.code} bang wheels!`, 'bad');
-      if (impact.imp > 8) {
+      if (hardContact) {
         const entryIndex = session.entries.indexOf(first);
         emitSessionEvent(session, { type: 'camera-candidate', entryIndex, kind: 'incident' });
       }
     }
-    if (session.mode === 'race' && impact.imp > 13) {
+    if (session.mode === 'race' && hardContact) {
       damagePart(first, 'h', impact.imp * 0.004);
       damagePart(second, 'h', impact.imp * 0.004);
     }
@@ -349,8 +399,6 @@ function recordHardImpact(
     slipB: Math.abs(second.car.slipR),
     brakeA: first.inp.brake,
     brakeB: second.inp.brake,
-    capA: Number.isFinite(first.vCap) ? first.vCap : -1,
-    capB: Number.isFinite(second.vCap) ? second.vCap : -1,
     liftA: first.liftT,
     liftB: second.liftT,
     recA: first.recT,
@@ -362,7 +410,7 @@ function recordHardImpact(
     k: curvature,
     room: !!session.roomPairs?.[roomKey],
     off: !!(first.car.offCourse || second.car.offCourse),
-    atk: first.atkT > 0 || second.atkT > 0
+    atk: first.battle || second.battle
   };
   const samples = session.hitSamples ?? (session.hitSamples = []);
   samples.push(sample);
@@ -378,9 +426,12 @@ function recordHardImpact(
     entry.car.h = normAng(entry.car.h + normAng(desired - entry.car.h) * 0.35);
     entry.car.r *= 0.3;
     entry.car.vy *= 0.55;
-    entry.atkT = 0;
-    entry.atkCd = Math.max(entry.atkCd, 1.5);
-    entry.latTgt = 0;
+    setTargetAbsLat(
+      session,
+      entry,
+      session.trk.idealPath?.off[entryIndex] ?? 0,
+      'contact-recovery'
+    );
   }
 }
 

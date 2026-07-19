@@ -40,6 +40,7 @@ export interface TrackRenderCache {
   curbW: Path2D;
   chkD: Path2D;
   chkL: Path2D;
+  gridSlots: Path2D;
   pitLane: Path2D;
   pitWall: Path2D;
   pitBoxes: Path2D;
@@ -342,7 +343,7 @@ export function createRenderer(options: RendererOptions): Renderer {
   function ensureTrack(track: Track): TrackRenderCache {
     const existing = caches.get(track);
     if (existing) return existing;
-    const built = buildRenderCache(track, options.teams);
+    const built = buildTrackRenderCache(track, options.teams);
     caches.set(track, built);
     return built;
   }
@@ -486,7 +487,10 @@ export function createRenderer(options: RendererOptions): Renderer {
     context.fill(cache.chkD);
     context.fillStyle = '#F2ECDD';
     context.fill(cache.chkL);
-    if (options.debugLine()) drawDebugLine(context, track, cache);
+    if (options.debugLine()) {
+      drawDebugLine(context, track, cache);
+      drawDebugRacecraftPaths(context, track, session);
+    }
     context.strokeStyle = 'rgba(245,241,230,0.65)';
     context.lineWidth = 0.26;
     context.stroke(cache.pitBoxes);
@@ -537,12 +541,16 @@ export function createRenderer(options: RendererOptions): Renderer {
   return { ensureTrack, render, drawCardPreview };
 }
 
-function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderCache {
-  const halfWidth = track.hw;
+export function buildTrackRenderCache(
+  track: Track,
+  teams: readonly TeamRef[]
+): TrackRenderCache {
+  const halfWidth = track.halfWidth[0]!;
   const samples = track.n;
-  const ring = (offset: number): Path2D => {
+  const ring = (side: -1 | 1, inset = 0): Path2D => {
     const path = new Path2D();
     for (let index = 0; index < samples; index++) {
+      const offset = side * Math.max(0, track.halfWidth[index]! - inset);
       const x = track.x[index]! + track.nx[index]! * offset;
       const y = track.y[index]! + track.ny[index]! * offset;
       if (index === 0) path.moveTo(x, y);
@@ -552,10 +560,10 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
     return path;
   };
   const road = new Path2D();
-  road.addPath(ring(halfWidth));
-  road.addPath(ring(-halfWidth));
-  const edgeL = ring(halfWidth - 0.22);
-  const edgeR = ring(-(halfWidth - 0.22));
+  road.addPath(ring(1));
+  road.addPath(ring(-1));
+  const edgeL = ring(1, 0.22);
+  const edgeR = ring(-1, 0.22);
   const curbR = new Path2D();
   const curbW = new Path2D();
   for (const curb of track.curbs) {
@@ -569,6 +577,7 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
   }
   const chkD = new Path2D();
   const chkL = new Path2D();
+  const gridSlots = new Path2D();
   const tangentX = track.tx[0]!;
   const tangentY = track.ty[0]!;
   const normalX = track.nx[0]!;
@@ -587,6 +596,22 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
       path.closePath();
     }
   }
+  for (let slot = 0; slot < 20; slot++) {
+    const distance = 10 + Math.floor(slot / 2) * 8.5;
+    const sample = ((track.grid.i - Math.round(distance / track.step)) % samples + samples) % samples;
+    const lateral = slot % 2 === 0 ? -2.1 : 2.1;
+    const centerX = track.x[sample]! + track.nx[sample]! * lateral;
+    const centerY = track.y[sample]! + track.ny[sample]! * lateral;
+    const forwardX = track.tx[sample]! * 2.7;
+    const forwardY = track.ty[sample]! * 2.7;
+    const sideX = track.nx[sample]! * 1.05;
+    const sideY = track.ny[sample]! * 1.05;
+    gridSlots.moveTo(centerX - forwardX - sideX, centerY - forwardY - sideY);
+    gridSlots.lineTo(centerX + forwardX - sideX, centerY + forwardY - sideY);
+    gridSlots.lineTo(centerX + forwardX + sideX, centerY + forwardY + sideY);
+    gridSlots.lineTo(centerX - forwardX + sideX, centerY - forwardY + sideY);
+    gridSlots.closePath();
+  }
   const pit = track.pit;
   const pitLane = new Path2D();
   const innerEdge: Array<{ x: number; y: number }> = [];
@@ -594,7 +619,8 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
   for (let longitudinal = 0; longitudinal <= pit.Lp; longitudinal += 2) {
     const offset = pit.off(longitudinal);
     const boxZone = longitudinal > pit.rampIn + 6 && longitudinal < pit.Lp - pit.rampOut - 6;
-    const inner = Math.max(halfWidth - 0.6, offset - 2.6);
+    const sample = pit.posAt(longitudinal, 0).i;
+    const inner = Math.max(track.halfWidth[sample]! - 0.6, offset - 2.6);
     const outer = Math.max((boxZone ? pit.boxOff : offset) + 2.6, inner + 1.2);
     innerEdge.push(pit.posAt(longitudinal, inner));
     outerEdge.push(pit.posAt(longitudinal, outer));
@@ -611,7 +637,8 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
   const pitWall = new Path2D();
   let firstWallPoint = true;
   for (let longitudinal = pit.rampIn + 4; longitudinal <= pit.Lp - pit.rampOut - 2; longitudinal += 3) {
-    const point = pit.posAt(longitudinal, halfWidth + 1.15);
+    const sample = pit.posAt(longitudinal, 0).i;
+    const point = pit.posAt(longitudinal, track.halfWidth[sample]! + 1.15);
     if (firstWallPoint) {
       pitWall.moveTo(point.x, point.y);
       firstWallPoint = false;
@@ -639,9 +666,10 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
     boxPads.push({ x: point.x, y: point.y, h: point.h, color: teams[box]!.body });
   }
   const standIndex = 14 % samples;
+  const standHalfWidth = track.halfWidth[standIndex]!;
   const stand: StandCache = {
-    x: track.x[standIndex]! - track.nx[standIndex]! * (halfWidth + 12),
-    y: track.y[standIndex]! - track.ny[standIndex]! * (halfWidth + 12),
+    x: track.x[standIndex]! - track.nx[standIndex]! * (standHalfWidth + 12),
+    y: track.y[standIndex]! - track.ny[standIndex]! * (standHalfWidth + 12),
     ang: Math.atan2(track.ty[standIndex]!, track.tx[standIndex]!),
     len: 42,
     dep: 7.5,
@@ -716,6 +744,7 @@ function buildRenderCache(track: Track, teams: readonly TeamRef[]): TrackRenderC
     curbW,
     chkD,
     chkL,
+    gridSlots,
     pitLane,
     pitWall,
     pitBoxes,
@@ -773,6 +802,53 @@ function drawDebugLine(
     const y = track.y[apex]! + track.ny[apex]! * offset;
     context.fillStyle = '#F5F1E6';
     context.fillText(corner.complexId ?? corner.id, x, y - 4.2);
+  }
+  context.restore();
+}
+
+/** Draw committed lane programs; pit travel retains its sampled-path view. */
+function drawDebugRacecraftPaths(
+  context: CanvasRenderingContext2D,
+  track: Track,
+  session: Session
+): void {
+  const sampleStep = Math.max(1, Math.round(3 / track.step));
+  const sampleCount = Math.max(2, Math.ceil(220 / track.step));
+  context.save();
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.font = '3.2px monospace';
+  context.textAlign = 'left';
+  context.textBaseline = 'bottom';
+  for (const entry of session.entries) {
+    if (!entry.car || !entry.pathMode || entry.pathMode === 'ideal') continue;
+    const pitPath = entry.pathPlan?.mode === 'pit' ? entry.path : undefined;
+    const lane = pitPath ? undefined : entry.laneBuffer;
+    if (!pitPath && (!lane || lane.count <= 0)) continue;
+    const start = Math.max(0, entry.car.progIdx) % track.n;
+    context.beginPath();
+    let labelX = 0;
+    let labelY = 0;
+    for (let delta = 0; delta <= sampleCount; delta += sampleStep) {
+      if (lane && delta >= lane.count) break;
+      const index = (start + delta) % track.n;
+      const offset = pitPath?.off[index] ?? lane?.off[delta];
+      if (offset == null || !Number.isFinite(offset)) continue;
+      const x = track.x[index]! + track.nx[index]! * offset;
+      const y = track.y[index]! + track.ny[index]! * offset;
+      if (delta === 0) {
+        context.moveTo(x, y);
+        labelX = x;
+        labelY = y;
+      } else context.lineTo(x, y);
+    }
+    context.strokeStyle = entry.style.accent;
+    context.lineWidth = 0.85;
+    context.setLineDash([2.4, 1.4]);
+    context.stroke();
+    context.setLineDash([]);
+    context.fillStyle = entry.style.accent;
+    context.fillText(`${entry.code} ${entry.pathMode}`, labelX + 2.4, labelY - 1.8);
   }
   context.restore();
 }

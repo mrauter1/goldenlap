@@ -17,8 +17,16 @@ import { DRIVERS } from './data/personnel';
 import { TEAM_DEFS } from './data/teams';
 import { TRACK_DEFS } from './data/tracks';
 import type { GameState } from './game/model';
+import { runFocusedSession, runSingleCar } from './game/headless-sim';
 import { raceLapsFor as profileRaceLapsFor } from './game/weekend';
 import type { Entry, Session } from './session/model';
+import {
+  evaluateLaneEta,
+  evaluateLaneProgram,
+  laneProgramTargetAbs,
+  setLaneProgram
+} from './session/racecraft/lane-program';
+import { owes } from './session/racecraft/relations';
 import { entryMargin as sessionEntryMargin } from './session/strategy';
 import type { CalendarEventDefinition } from './shared/types';
 import type { ControlsController } from './ui/controls';
@@ -245,6 +253,37 @@ export function installTestApi(options: TestApiOptions): GoldenLapTestApi {
     TRACK_DEFS,
     get S(): Session | null { return state.S ? sessionFacade(state.S) : null; }
   };
+  Object.defineProperty(api, Symbol.for('goldenlap.headlessParity'), {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: (trackId = 'prado', seed = 101): object => {
+      const built = tracks.find(candidate => candidate.def.id === trackId);
+      if (!built) throw new Error(`Unknown parity track ${trackId}`);
+      return {
+        schemaVersion: 1,
+        trackId,
+        seed,
+        clean: runSingleCar(built, { laps: 1, seed }),
+        pair: runFocusedSession(built, { scenario: 'pair', seed }),
+        pit: runFocusedSession(built, { scenario: 'pit', seed }),
+        priority: runFocusedSession(built, { scenario: 'priority', seed }),
+        classification: runFocusedSession(built, { scenario: 'classification', seed })
+      };
+    }
+  });
+  Object.defineProperty(api, Symbol.for('goldenlap.racecraftDiagnostics'), {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: {
+      owes,
+      evaluateLaneEta,
+      evaluateLaneProgram,
+      laneProgramTargetAbs,
+      setLaneProgram
+    }
+  });
   window.__GL = api;
   return api;
 }

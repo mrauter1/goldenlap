@@ -11,19 +11,24 @@ import {
 } from '../../../src/core/racing-line';
 import { buildTrack } from '../../../src/core/track';
 import { TRACK_DEFS } from '../../../src/data/tracks';
-import { createEntry } from '../../../src/session/entry';
-import type { Entry, LineupEntry, RaceSession, Session } from '../../../src/session/model';
+import { createEntry, launchFromPit, stepEntry } from '../../../src/session/entry';
+import type {
+  Entry, LineupEntry, QualifyingSession, RaceSession, Session
+} from '../../../src/session/model';
 import {
   claimPitReservation,
   notePitProgress,
   occupiesPitTravelLane,
   pitIngressStartW,
+  pitEgressEndW,
   pitOccupancy,
   pitQueuePoint,
   pitSweptOccupanciesOverlap,
   pitTrafficReference,
   planPitMotion
 } from '../../../src/session/pit';
+import { syncPitPaths } from '../../../src/session/racecraft/paths';
+import { stepSession } from '../../../src/session/session';
 
 type ActiveEntry = Entry & { car: Car };
 
@@ -100,6 +105,32 @@ function raceSession(trackIndex: number): RaceSession {
   };
 }
 
+function qualifyingSession(trackIndex: number): QualifyingSession {
+  const base = raceSession(trackIndex);
+  return {
+    trk: base.trk,
+    prof: base.prof,
+    entries: [],
+    config: base.config,
+    events: [],
+    t: 20,
+    tEnd: 1_000,
+    scale: 1,
+    prevScale: 1,
+    wet: 0,
+    evo: 0,
+    phase: 'run',
+    uiT: 0,
+    trafT: 0,
+    goT: 0,
+    camI: 0,
+    mode: 'quali',
+    done: false,
+    over: false,
+    mile: {}
+  };
+}
+
 function placePit(
   session: Session,
   entry: ActiveEntry,
@@ -166,6 +197,31 @@ describe('pit swept occupancy and reservations', () => {
     expect(Number.isFinite(reference?.distance)).toBe(true);
   });
 
+  test('a reserved crossing owner proceeds while through traffic yields to it', () => {
+    const session = raceSession(0);
+    const crossing = activeEntry('CROSSING-OWNER', 1);
+    const ahead = activeEntry('LANE-AHEAD', 0);
+    const behind = activeEntry('LANE-BEHIND', 2);
+    const boxW = session.trk.pit.boxWAt(crossing.ti);
+
+    placePit(session, crossing, 'pitOut', boxW + 2, session.trk.pit.laneOff + 1.2, 3);
+    crossing.pitPhase = 'egress';
+    session.entries = [crossing];
+    expect(claimPitReservation(crossing, session, 'egress', boxW).granted).toBe(true);
+
+    placePit(session, ahead, 'pitIn', boxW + 12, session.trk.pit.laneOff, 14);
+    ahead.pitPhase = 'travel';
+    placePit(session, behind, 'pitIn', boxW - 12, session.trk.pit.laneOff, 14);
+    behind.pitPhase = 'travel';
+    session.entries = [crossing, ahead, behind];
+
+    expect(pitTrafficReference(crossing, session)).toBeNull();
+    expect(pitTrafficReference(behind, session)).toMatchObject({
+      entry: crossing,
+      reason: 'physical-crossing'
+    });
+  });
+
   test('through-lane traffic blocks a box release and stale claims expire safely', () => {
     const session = raceSession(1);
     const release = activeEntry('RELEASE', 2);
@@ -191,6 +247,83 @@ describe('pit swept occupancy and reservations', () => {
     expect(claimPitReservation(traveller, session, 'ingress', boxW).granted).toBe(true);
     expect(session.pitReservations?.size).toBe(1);
   });
+
+  test('egress ends once after rear-envelope clearance and cannot reacquire the old box claim', () => {
+    const session = raceSession(0);
+    const release = activeEntry('FINITE-EGRESS', 2);
+    const boxW = session.trk.pit.boxWAt(release.ti);
+    const clearW = pitEgressEndW(release, session);
+    placePit(session, release, 'pitOut', boxW, session.trk.pit.boxOff, 0);
+    release.pitPhase = 'egress';
+    session.entries = [release];
+
+    expect(claimPitReservation(release, session, 'egress', boxW).granted).toBe(true);
+    expect(session.pitReservations?.size).toBe(1);
+
+    placePit(session, release, 'pitOut', clearW + 0.01, session.trk.pit.laneOff, 5);
+    release.pitPhase = 'egress';
+    const cleared = planPitMotion(release, session);
+    expect(cleared.phase).toBe('travel');
+    expect(session.pitReservations?.size ?? 0).toBe(0);
+    expect(release.pitReservationKey).toBeUndefined();
+
+    release.pitPhase = cleared.phase;
+    const next = planPitMotion(release, session);
+    expect(next.phase).toBe('travel');
+    expect(session.pitReservations?.size ?? 0).toBe(0);
+    expect(release.pitReservationKey).toBeUndefined();
+  });
+
+  test('overlapping qualifying launches clear every team box on every track', () => {
+    for (let trackIndex = 0; trackIndex < TRACK_DEFS.length; trackIndex++) {
+      for (const reverse of [false, true]) {
+        const session = qualifyingSession(trackIndex);
+        const entries = Array.from({ length: 6 }, (_, teamIndex) =>
+          activeEntry(`Q-${trackIndex}-${teamIndex}-${reverse ? 'R' : 'F'}`, teamIndex));
+        session.entries = reverse ? entries.reverse() : entries;
+        for (const entry of session.entries) launchFromPit(entry, session);
+
+        const deadline = session.t + 55;
+        while (session.t < deadline && session.entries.some(entry => entry.state !== 'run'))
+          stepSession(session, 1 / 120);
+
+        expect(session.entries.every(entry => entry.state === 'run')).toBe(true);
+        expect(session.pitDeadlocks ?? []).toHaveLength(0);
+        expect(session.pitReservations?.size ?? 0).toBe(0);
+        for (const entry of session.entries) {
+          expect(entry.pitW).toBeNull();
+          expect(entry.pitReservationKey).toBeUndefined();
+          expect(entry.pitPhase).toBeUndefined();
+        }
+      }
+    }
+  }, 45_000);
+
+  test('sequential qualifying launches never inherit an earlier box reservation', () => {
+    for (let trackIndex = 0; trackIndex < TRACK_DEFS.length; trackIndex++) {
+      const session = qualifyingSession(trackIndex);
+      session.entries = Array.from({ length: 6 }, (_, teamIndex) =>
+        activeEntry(`SEQ-${trackIndex}-${teamIndex}`, teamIndex));
+      for (const entry of session.entries) entry.state = 'box';
+
+      let next = 0;
+      const deadline = session.t + 70;
+      while (session.t < deadline) {
+        if (next < session.entries.length && session.t >= 20 + next * 0.6) {
+          launchFromPit(session.entries[next]!, session);
+          next++;
+        }
+        stepSession(session, 1 / 120);
+        if (next === session.entries.length && session.entries.every(entry => entry.state === 'run'))
+          break;
+      }
+
+      expect(next).toBe(session.entries.length);
+      expect(session.entries.every(entry => entry.state === 'run')).toBe(true);
+      expect(session.pitDeadlocks ?? []).toHaveLength(0);
+      expect(session.pitReservations?.size ?? 0).toBe(0);
+    }
+  }, 15_000);
 
   test('a same-team double stack queues off the lane then advances to the box', () => {
     const session = raceSession(2);
@@ -254,5 +387,53 @@ describe('pit swept occupancy and reservations', () => {
       reason: 'travel-lane',
       owner: 'OWNER'
     });
+  });
+
+  test('a sampled pit path remains the sole lateral authority through box release', () => {
+    const session = raceSession(0);
+    const entry = activeEntry('PATH-OWNER', 0);
+    const pit = session.trk.pit;
+    const boxW = pit.boxWAt(entry.ti);
+    const travelW = boxW - 12;
+    placePit(session, entry, 'pitIn', travelW, pit.off(travelW), 8);
+    entry.pitPhase = 'travel';
+    entry.car.vx = Math.cos(entry.car.h) * entry.spd;
+    entry.car.vy = Math.sin(entry.car.h) * entry.spd;
+    session.entries = [entry];
+
+    syncPitPaths(session, session.entries);
+    expect(entry.pathMode).toBe('pit');
+    expect(entry.path).toBeDefined();
+
+    // The pit path already contains the absolute lane offset. A controller
+    // tick must not copy that offset into the additive legacy scalar too.
+    entry.botTick = 0;
+    stepEntry(entry, session, 0.01, () => {});
+    expect(entry.state).toBe('pitIn');
+    expect(entry.lat).toBe(0);
+
+    // Model the completed stop without replacing the scalar just verified,
+    // then release through the same state transition used by a race session.
+    const stopped = pit.posAt(boxW, pit.boxOff);
+    entry.state = 'pit';
+    entry.pitPhase = 'stopped-box';
+    entry.pitW = boxW;
+    entry.pitT = 0;
+    entry.latNow = pit.boxOff;
+    entry.spd = 0;
+    entry.car.x = stopped.x;
+    entry.car.y = stopped.y;
+    entry.car.h = stopped.h;
+    entry.car.vx = 0;
+    entry.car.vy = 0;
+    entry.car.s = (pit.sEntry + boxW) % session.trk.len;
+    entry.car.progIdx = stopped.i;
+    stepEntry(entry, session, 0.01, () => {});
+    expect(entry.state as Entry['state']).toBe('pitOut');
+
+    expect(() => syncPitPaths(session, session.entries)).not.toThrow();
+    expect(entry.pathMode).toBe('pit');
+    expect(entry.lat).toBe(0);
+    expect(entry.pathMaxSlew ?? Infinity).toBeLessThanOrEqual(0.500001);
   });
 });

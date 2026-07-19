@@ -1,6 +1,7 @@
 import { ENGINEERS } from '../data/personnel';
 import { TEAM_DEFS } from '../data/teams';
 import { clamp } from '../shared/math';
+import { random } from '../shared/rng';
 import type { SpeedProfile } from '../core/model';
 import { createEntry, spawnOnTrack } from '../session/entry';
 import type {
@@ -22,8 +23,8 @@ export function buildLineup(state: GameState): LineupEntry[] {
     // Imported lazily through the stable catalogue access below so random
     // calls remain in exactly the legacy order.
     const driver = requireDriver(driverIndex);
-    let margin = 0.9115 + driver.spd * 0.0078 + (Math.random() - 0.5) * 0.0025;
-    if (driver.trait === 'wild') margin += (Math.random() - 0.5) * 0.010;
+    let margin = 0.9115 + driver.spd * 0.0078 + (random() - 0.5) * 0.0025;
+    if (driver.trait === 'wild') margin += (random() - 0.5) * 0.010;
     lineup.push({
       team: playerTeam,
       name: driver.name,
@@ -40,7 +41,7 @@ export function buildLineup(state: GameState): LineupEntry[] {
     const creep = state.round * 0.0007;
     team.drv.forEach((driver, index) => {
       const tier = team.tier + creep + (index ? -0.0045 : 0.0045) +
-        (Math.random() - 0.5) * 0.0025;
+        (random() - 0.5) * 0.0025;
       const level = rivalLevel(team.tier + creep);
       lineup.push({
         team,
@@ -49,7 +50,7 @@ export function buildLineup(state: GameState): LineupEntry[] {
         isPlayer: false,
         ci: -1,
         margin: tier,
-        focus: 0.45 + Math.random() * 0.3,
+        focus: 0.45 + random() * 0.3,
         trait: '',
         pw: 1 + 0.028 * level,
         dr: 1 - 0.045 * level,
@@ -76,8 +77,8 @@ export function createTuningState(state: GameState): TuningState {
     bonus: 0,
     g: [0, 1, 2].map(() => {
       const width = 12 + engineer.exp * 2.4;
-      const start = 46 + Math.random() * (92 - width - 46);
-      return { pos: 8 + Math.random() * 10, w0: start, w1: start + width, st: '' };
+      const start = 46 + random() * (92 - width - 46);
+      return { pos: 8 + random() * 10, w0: start, w1: start + width, st: '' };
     })
   };
 }
@@ -129,8 +130,8 @@ export function createQualifyingSession(
     entry.state = 'box';
     if (!entry.isPlayer) {
       entry.plan = [
-        { at: 40 + Math.random() * 420, hot: Math.random() < 0.6 ? 2 : 1 },
-        { at: 900 + Math.random() * 560, hot: Math.random() < 0.7 ? 2 : 1 }
+        { at: 40 + random() * 420, hot: random() < 0.6 ? 2 : 1 },
+        { at: 900 + random() * 560, hot: random() < 0.7 ? 2 : 1 }
       ];
     }
   }
@@ -184,17 +185,15 @@ export function createRaceSession(
     hitN: 0,
     hitHard: 0,
     hitOpenHard: 0,
-    concedeN: 0,
-    concedeSoftN: 0,
     sbsT: 0,
     sbsPairs: Object.create(null) as RaceSession['sbsPairs'] & object,
     sbsEpisodes: [],
     _sbsStamp: 0
   };
-  if (Math.random() < rainProbability) {
+  if (random() < rainProbability) {
     const duration = session.laps * built.prof.lapTime;
-    session.rainAt = (0.1 + Math.random() * 0.5) * duration;
-    session.rainEnd = session.rainAt + (0.25 + Math.random() * 0.5) * duration;
+    session.rainAt = (0.1 + random() * 0.5) * duration;
+    session.rainEnd = session.rainAt + (0.25 + random() * 0.5) * duration;
   }
   state.S = session;
   state.grid!.forEach((lineupIndex, gridIndex) => {
@@ -209,7 +208,7 @@ export function createRaceSession(
       const parts = state.cars![entry.ci]!.parts;
       entry.rel = { e: parts.e.rel, h: parts.h.rel, c: parts.c.rel };
     }
-    if (!entry.isPlayer && session.rainAt >= 0 && session.rainAt < 60 && Math.random() < 0.3)
+    if (!entry.isPlayer && session.rainAt >= 0 && session.rainAt < 60 && random() < 0.3)
       entry.tyre.c = 'W';
   });
   session.camI = session.entries.findIndex(entry => entry.isPlayer);
@@ -233,7 +232,7 @@ export function completeQualifying(state: GameState): QualifyingSession | null {
   if (count >= 3) ratio = total / count;
   for (const entry of session.entries) {
     if (!entry.isPlayer && !Number.isFinite(entry.best)) {
-      entry.best = session.prof.lapTime / entry.lu.margin * ratio * (1 + Math.random() * 0.012);
+      entry.best = session.prof.lapTime / entry.lu.margin * ratio * (1 + random() * 0.012);
       entry.synth = true;
     }
   }

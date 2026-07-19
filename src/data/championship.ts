@@ -6,7 +6,9 @@ export const CALENDAR = [
   { trk: 2, name: 'NORDWALD GP', rainP: 0.55 },
   { trk: 3, name: 'VILLA REALE GP', rainP: 0.35 },
   { trk: 4, name: 'ANHEMBI GP', rainP: 0.15 },
-  { trk: 5, name: 'GRAN PREMIO CERRO ALTO', rainP: 0.60 }
+  { trk: 5, name: 'GRAN PREMIO CERRO ALTO', rainP: 0.60 },
+  { trk: 6, name: 'ARDENNE CREST GP', rainP: 0.50 },
+  { trk: 7, name: 'PAULISTA LOOP GP', rainP: 0.35 }
 ] as const satisfies readonly CalendarEventDefinition[];
 export const PTSTAB = [9, 6, 4, 3, 2, 1];
 export const PRIZE = [20, 15, 11, 8, 6, 4, 3, 2, 1, 1, 1, 1];

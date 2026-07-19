@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "tracks": [
+    "prado",
+    "costa",
+    "nordwald",
+    "villa",
+    "anhembi",
+    "cerro",
+    "ardenne",
+    "paulista"
+  ],
+  "weather": ["dry", "wet"],
+  "seedSets": {
+    "calibration": [11, 29, 47, 71, 89],
+    "validation": [101, 211, 307, 401, 503],
+    "release": [1009, 2027, 4093, 6067, 8081, 10007]
+  },
+  "replicates": {
+    "fast": 1,
+    "validation": 1,
+    "release": 3
+  },
+  "derivedSeedRule": "baseSeed + replicateIndex * 1000003 + trackIndex * 1009 + weatherIndex * 101; controls reuse the exact derived seed",
+  "profileRobustness": [
+    { "id": "nominal", "gripScale": 1, "startLateralM": 0, "startSpeedDeltaMps": 0 },
+    { "id": "low-grip", "gripScale": 0.9, "startLateralM": 0, "startSpeedDeltaMps": 0 },
+    { "id": "high-grip", "gripScale": 1.05, "startLateralM": 0, "startSpeedDeltaMps": 0 },
+    { "id": "left-error", "gripScale": 1, "startLateralM": -0.5, "startSpeedDeltaMps": 0 },
+    { "id": "right-error", "gripScale": 1, "startLateralM": 0.5, "startSpeedDeltaMps": 0 },
+    { "id": "speed-error", "gripScale": 1, "startLateralM": 0, "startSpeedDeltaMps": 2 }
+  ],
+  "pairScenarioStrata": {
+    "phase": ["straight", "approach", "corner"],
+    "side": ["left", "right"],
+    "closingSpeedMps": [3, 8, 14],
+    "initialGapM": [18, 35, 70],
+    "intent": ["attack", "defend", "blue-flag", "qualifying-out", "qualifying-in"],
+    "traffic": ["pair", "three-car"]
+  },
+  "exposureDefinitions": {
+    "eligibleCatch": "A faster rear car satisfies the intent-specific closing/proximity gate.",
+    "passAttempt": "An attack maneuver whose feasible lane authority reaches its computed launch point or acquires physical body overlap; prelaunch intent selections are not attempts.",
+    "sideBySideSecond": "One simulated second with longitudinal body overlap and two usable lateral corridors.",
+    "carKilometre": "One active racing-surface car travelling 1000 metres.",
+    "obligationEpisode": "One contiguous interval in which the stateless blue-flag, qualifying, or damage relation is true for a pair.",
+    "pitConflict": "One overlapping swept-volume queue, box crossing, release, or merge reservation."
+  },
+  "separationRule": "Calibration, validation, and release seeds are pairwise disjoint and must not be reassigned to make a result pass."
+}

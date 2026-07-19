@@ -1,0 +1,1 @@
+Implement track_builder_plan.md phases R0 through R5 completely and correctly under AGENTS.md. Preserve all unrelated dirty-worktree changes. Do not proceed to T4 or T5 unless the racecraft sequencing gate is demonstrably open. Do not change racing behavior or calibration.

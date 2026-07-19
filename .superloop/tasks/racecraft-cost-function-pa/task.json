@@ -1,0 +1,36 @@
+{
+  "task_id": "racecraft-cost-function-pa",
+  "created_at": "2026-07-18T19:45:02.447388+00:00",
+  "request_text": "Implement only P-A \u2014 Free the lane \u2014 from racecraft_cost_function_plan.md end to end. Read the plan's Why this plan exists, Governing principle, objective geometry/cadence sections, P-A, implementation contract, and the existing racecraft_cost_function_implementation_report.md before editing. P0 is complete. Follow the user's phase order and deletion list exactly: timer accumulation first; audit TRAF_DT consumers; remove/re-scope reactionSeconds and reconcile AGENTS.md; remove own-claim lane authority; restore authored slot-zero cross-track reference; replace multi-point smootherstep with slope-matched interpolation and analytic authored curvature; delete dead installed-bound/self-clamp semantics and tests. Do not implement P-B or later. Preserve unrelated dirty-worktree changes. Per edit run typecheck and touched test; run the P-A probe once, record exact result/deviations/approximations in the report, update plan/report P-A status, and run bun run build at phase end. Zero tuned constants, net deletion, no git.",
+  "request_updated_at": "2026-07-18T19:45:18.547000+00:00",
+  "phase_plan_path": "/home/marcelo/code/goldenlap/.superloop/tasks/racecraft-cost-function-pa/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260718T194614Z-9e4ef26b",
+    "mode": "single",
+    "phase_ids": [
+      "implicit-phase"
+    ],
+    "explicit": false,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "implicit-phase": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "implicit-phase",
+      "run_id": "run-20260718T194502Z-aa043140",
+      "status": "in_progress",
+      "ts": "2026-07-18T19:45:02.460305+00:00"
+    },
+    {
+      "phase_id": "implicit-phase",
+      "run_id": "run-20260718T194614Z-9e4ef26b",
+      "status": "completed",
+      "ts": "2026-07-19T02:05:03.448374+00:00",
+      "pair": "test"
+    }
+  ]
+}

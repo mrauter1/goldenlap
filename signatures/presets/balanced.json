@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 2,
+  "id": "preset-balanced-v2",
+  "name": "Balanced topology grammar",
+  "archetype": "balanced",
+  "winding": "counter-clockwise",
+  "groups": [
+    {
+      "id": "pit-straight",
+      "kind": "nominal-straight",
+      "motif": "true-straight",
+      "lengthMetres": [800, 900],
+      "lobes": [],
+      "movable": false,
+      "role": "grid-pit"
+    },
+    {
+      "id": "slow-left",
+      "kind": "corner",
+      "motif": "early-apex",
+      "lengthMetres": [150, 190],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [105, 115] }
+      ],
+      "radiusClass": "slow",
+      "movable": true
+    },
+    {
+      "id": "flowing-chain",
+      "kind": "complex",
+      "motif": "sweeper-chain",
+      "lengthMetres": [590, 680],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [55, 66] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-127, -108] },
+        { "firstKnot": 4, "lastKnot": 6, "angleDegrees": [72, 88] }
+      ],
+      "movable": true
+    },
+    {
+      "id": "fast-left",
+      "kind": "corner",
+      "motif": "long-sweeper",
+      "lengthMetres": [300, 360],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [62, 68] }
+      ],
+      "radiusClass": "fast",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-18, 18] }
+        ]
+      }
+    },
+    {
+      "id": "middle-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-bow",
+      "lengthMetres": [580, 690],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [2, 5] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-240, 240],
+        "shallowBendBiasDelta": [-0.5, 0.5]
+      }
+    },
+    {
+      "id": "hairpin-left",
+      "kind": "corner",
+      "motif": "late-apex",
+      "lengthMetres": [155, 185],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [170, 180] }
+      ],
+      "radiusClass": "hairpin",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-15, 15] }
+        ]
+      }
+    },
+    {
+      "id": "kink-right",
+      "kind": "corner",
+      "motif": "single-apex",
+      "lengthMetres": [145, 175],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-25, -20] }
+      ],
+      "radiusClass": "kink",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-4, 4] }
+        ]
+      }
+    },
+    {
+      "id": "medium-right",
+      "kind": "corner",
+      "motif": "decreasing-radius",
+      "lengthMetres": [190, 230],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 3, "angleDegrees": [-90, -82] }
+      ],
+      "radiusClass": "medium",
+      "movable": true
+    },
+    {
+      "id": "double-right",
+      "kind": "corner",
+      "motif": "double-apex",
+      "lengthMetres": [320, 380],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [-104, -96] }
+      ],
+      "radiusClass": "medium",
+      "movable": true
+    },
+    {
+      "id": "opening-s",
+      "kind": "complex",
+      "motif": "s",
+      "lengthMetres": [390, 460],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [76, 88] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-88, -76] }
+      ],
+      "movable": true
+    },
+    {
+      "id": "closing-sweeper",
+      "kind": "corner",
+      "motif": "long-sweeper",
+      "lengthMetres": [420, 500],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [196, 204] }
+      ],
+      "radiusClass": "medium",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-25, 25] }
+        ]
+      }
+    },
+    {
+      "id": "closing-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-s",
+      "lengthMetres": [430, 520],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [2, 4] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-4, -2] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-220, 220]
+      }
+    }
+  ]
+}

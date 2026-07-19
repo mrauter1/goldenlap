@@ -35,6 +35,7 @@ function layerOf(file) {
   if (parts[0] !== 'src') return null;
   if (productionLayers.has(parts[1])) return parts[1];
   if (parts[1] === 'main.ts') return 'main';
+  if (parts[1] === 'track-studio-main.ts') return 'track-studio';
   if (parts[1] === 'test-api.ts') return 'test-api';
   if (parts[1] === 'globals.d.ts') return 'globals';
   return null;
@@ -93,6 +94,10 @@ for (const file of files) {
       failures.push(`${rel}: only main.ts may import test-api.ts`);
     if (layer !== 'main' && targetLayer === 'main')
       failures.push(`${rel}: production module imports the composition root`);
+    if (layer !== 'track-studio' && targetLayer === 'track-studio')
+      failures.push(`${rel}: production module imports the studio composition root`);
+    if (layer === 'track-studio' && targetLayer !== 'ui')
+      failures.push(`${rel}: studio composition root may import only the ui layer`);
   }
 }
 
@@ -125,6 +130,17 @@ else {
   if (body.trim()) failures.push('index.html: inline executable script body');
   if (!/\bdefer\b/i.test(attributes) || !/\bsrc=["']\.\/dist\/goldenlap\.js["']/i.test(attributes))
     failures.push('index.html: script must be one deferred ./dist/goldenlap.js reference');
+}
+const studioHtml = fs.readFileSync(path.join(root, 'track-studio.html'), 'utf8');
+const studioScripts = [...studioHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+if (studioScripts.length !== 1)
+  failures.push(`track-studio.html: expected one script tag, found ${studioScripts.length}`);
+else {
+  const [, attributes, body] = studioScripts[0];
+  if (body.trim()) failures.push('track-studio.html: inline executable script body');
+  if (!/\bdefer\b/i.test(attributes) ||
+      !/\bsrc=["']\.\/dist\/track-studio\.js["']/i.test(attributes))
+    failures.push('track-studio.html: script must be one deferred ./dist/track-studio.js reference');
 }
 const redirectHtml = fs.readFileSync(path.join(root, 'golden-lap.html'), 'utf8');
 if (/<script\b/i.test(redirectHtml)) failures.push('golden-lap.html: redirect must be script-free');

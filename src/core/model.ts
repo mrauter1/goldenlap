@@ -1,6 +1,18 @@
 import type { RandomSource } from '../shared/rng';
-import type { TrackDefinition } from '../shared/types';
-export type { TrackDefinition, TrackPalette } from '../shared/types';
+import type {
+  CornerAlternateLineProfile,
+  CornerLineFamilyProfile,
+  TrackDefinition,
+  TrackProfile,
+  TrackProfileRuntimeState
+} from '../shared/types';
+export type {
+  CornerAlternateLineProfile, CornerLineFamilyProfile, CornerLineKind, CornerLinePairProfile,
+  CornerLineProvenance, CornerLineTerminal,
+  CornerLinePointProfile, TrackDefinition, TrackPalette, TrackProfile, TrackProfileAnchor,
+  TrackProfileMetrics, TrackProfileProvenance, TrackProfileRuntimeState,
+  TrackProfileRuntimeStatus, TrackWidthKey, TrackPitHint
+} from '../shared/types';
 
 export type NumericArray = Float64Array<ArrayBuffer> & { [index: number]: number };
 export type IntegerArray = Int32Array<ArrayBuffer> & { [index: number]: number };
@@ -32,7 +44,36 @@ export interface StartLine {
 }
 
 export interface GridSlot { x: number; y: number; h: number; i: number }
-export interface CurbSegment { p: DenseArray<number>; red: boolean }
+export interface CurbSegment {
+  p: DenseArray<number>;
+  red: boolean;
+  index: number;
+  side: -1 | 1;
+}
+
+export interface TrackSurfaceMap {
+  schemaVersion: 1;
+  roadHalfWidth: number;
+  curbInner: number;
+  curbOuter: number;
+  roadHalfWidthAt: NumericArray;
+  curbInnerAt: NumericArray;
+  curbOuterAt: NumericArray;
+  curbNegative: Uint8Array;
+  curbPositive: Uint8Array;
+  normalMinimum: NumericArray;
+  normalMaximum: NumericArray;
+  fingerprint: string;
+}
+
+export interface SurfaceExposure {
+  road: number;
+  curb: number;
+  grass: number;
+  mu: number;
+  drag: number;
+  zone: 'road' | 'curb' | 'grass';
+}
 
 export type DecorationType = 'tree' | 'bush' | 'rock' | 'bale';
 export interface Decoration {
@@ -73,6 +114,7 @@ export interface Corner {
   trackOutI: number;
   exitI: number;
   vApex: number;
+  passScore: number;
   side: -1 | 1;
   severity: number;
   complexId: string | null;
@@ -84,6 +126,10 @@ export interface Corner {
   planRole: 'isolated' | 'complex-primary' | 'complex-secondary';
   compromised: boolean;
   reason: string;
+  alternateLines?: {
+    inside: CornerLineFamilyProfile;
+    outside: CornerLineFamilyProfile;
+  };
 }
 
 export type LegacyCorner = Corner;
@@ -94,9 +140,7 @@ export type PathMode =
   | 'defend'
   | 'side-inside'
   | 'side-outside'
-  | 'blue-yield'
-  | 'qualifying-yield'
-  | 'priority-pass'
+  | 'obstacle-avoid'
   | 'tuck'
   | 'pit';
 
@@ -108,6 +152,20 @@ export interface SampledPath {
   v: NumericArray;
   cornerId?: string;
   complexId?: string | null;
+}
+
+/** Fixed local path span filled by the 30 Hz racecraft lane evaluator. */
+export interface LaneSampleBuffer {
+  startIndex: number;
+  count: number;
+  /** Allocation-free empty-program authority; null while samples are deformed. */
+  uniformBias: number | null;
+  off: NumericArray;
+  k: NumericArray;
+  ds: NumericArray;
+  v: NumericArray;
+  mu: NumericArray;
+  drag: NumericArray;
 }
 
 export interface PathGeometry {
@@ -144,6 +202,7 @@ export interface Track {
   kSm: NumericArray;
   len: number;
   hw: number;
+  halfWidth: NumericArray;
   cell: number;
   hash: Map<string, DenseArray<number>>;
   cps: DenseArray<TrackCheckpoint>;
@@ -151,6 +210,7 @@ export interface Track {
   line: StartLine;
   grid: GridSlot;
   curbs: DenseArray<CurbSegment>;
+  surface: TrackSurfaceMap;
   minR: number;
   pit: PitGeometry;
   bbox: { x0: number; y0: number; x1: number; y1: number };
@@ -159,6 +219,10 @@ export interface Track {
   idealTiming?: PathTiming;
   corners?: DenseArray<LegacyCorner>;
   cornerNext?: IntegerArray;
+  /** Derived 0..1 lift-to-full-braking threat at each track sample. */
+  brakingThreat?: NumericArray;
+  trackProfile?: TrackProfile;
+  trackProfileState?: TrackProfileRuntimeState;
 }
 
 export interface NearestSample { i: number; d2: number }
@@ -196,14 +260,33 @@ export interface CarInput {
   hand: boolean;
 }
 
-export interface CarModifiers { pw: number; mu: number; dr: number }
+export interface CarModifiers {
+  pw: number;
+  mu: number;
+  dr: number;
+  /** Fraction of nominal aerodynamic load retained by the car. */
+  df: number;
+}
+
+/** A moving longitudinal constraint consumed by the anticipatory controller. */
+export interface TrafficSlowPoint {
+  /** Braking room to the published station after physical body clearance. */
+  distance: number;
+  /** Published speed at that station. */
+  speed: number;
+}
 
 export interface BotParameters {
   margin?: number;
   muScale?: number;
+  downforceScale?: number;
+  brakingEffort?: number;
+  powerScale?: number;
+  controlStepSeconds?: number;
   lat?: number;
   vCap?: number;
   path?: SampledPath;
+  lane?: LaneSampleBuffer;
   pathTuning?: PathFollowerTuning;
 }
 
@@ -238,6 +321,7 @@ export interface BuiltTrack {
     idealTiming: PathTiming;
     corners: DenseArray<LegacyCorner>;
     cornerNext: IntegerArray;
+    brakingThreat: NumericArray;
   };
   prof: SpeedProfile;
 }

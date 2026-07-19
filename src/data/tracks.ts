@@ -1,4 +1,6 @@
 import type { TrackDefinition } from '../shared/types';
+import { ARDENNE_TRACK } from './generated/ardenne/track-definition';
+import { PAULISTA_TRACK } from './generated/paulista/track-definition';
 
 export const TRACK_DEFS = [
   {
@@ -159,7 +161,9 @@ export const TRACK_DEFS = [
       [-404.9, 5.7], [-389.4, 0], [-372.3, 0], [-348.3, 0], [-313.3, 0], [-262.2, 0],
       [-188.2, 0], [-80.1, 0]
     ]
-  }
+  },
+  ARDENNE_TRACK,
+  PAULISTA_TRACK
 ] satisfies readonly TrackDefinition[];
 
 // ---------------------------------------------------------------- track build

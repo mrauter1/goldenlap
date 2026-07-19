@@ -1,0 +1,1 @@
+Implement racecraft_trajectory_revamp_plan.md completely, in mandatory order L0, L1, L2, L3, L4, L4b, L5. Obey AGENTS.md, audit_toolkit_plan.md, and the user's phase-by-phase verification, runtime, determinism, fixture, report, and acceptance requirements. Preserve the existing intent and safety systems; replace only lateral output, retaining pit paths.

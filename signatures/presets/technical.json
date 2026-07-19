@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 2,
+  "id": "preset-technical-v2",
+  "name": "Technical topology grammar",
+  "archetype": "technical",
+  "winding": "clockwise",
+  "groups": [
+    {
+      "id": "pit-straight",
+      "kind": "nominal-straight",
+      "motif": "true-straight",
+      "lengthMetres": [680, 760],
+      "lobes": [],
+      "movable": false,
+      "role": "grid-pit"
+    },
+    {
+      "id": "double-right",
+      "kind": "corner",
+      "motif": "double-apex",
+      "lengthMetres": [270, 320],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [-104, -96] }
+      ],
+      "radiusClass": "medium",
+      "movable": true
+    },
+    {
+      "id": "kink-right",
+      "kind": "corner",
+      "motif": "single-apex",
+      "lengthMetres": [220, 260],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-28, -22] }
+      ],
+      "radiusClass": "kink",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-20, 20] }
+        ]
+      }
+    },
+    {
+      "id": "closing-sweeper",
+      "kind": "corner",
+      "motif": "long-sweeper",
+      "lengthMetres": [410, 480],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [-150, -140] }
+      ],
+      "radiusClass": "medium",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-25, 25] }
+        ]
+      }
+    },
+    {
+      "id": "slow-left",
+      "kind": "corner",
+      "motif": "late-apex",
+      "lengthMetres": [140, 175],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [105, 115] }
+      ],
+      "radiusClass": "slow",
+      "movable": true
+    },
+    {
+      "id": "middle-s",
+      "kind": "complex",
+      "motif": "s",
+      "lengthMetres": [310, 370],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-138, -119] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [119, 138] }
+      ],
+      "movable": true
+    },
+    {
+      "id": "short-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-bow",
+      "lengthMetres": [350, 410],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-5, -2] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-200, 200],
+        "shallowBendBiasDelta": [-0.5, 0.5]
+      }
+    },
+    {
+      "id": "medium-right",
+      "kind": "corner",
+      "motif": "decreasing-radius",
+      "lengthMetres": [165, 205],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 3, "angleDegrees": [-90, -82] }
+      ],
+      "radiusClass": "medium",
+      "movable": true
+    },
+    {
+      "id": "opening-chicane",
+      "kind": "complex",
+      "motif": "chicane",
+      "lengthMetres": [260, 320],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [138, 158] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-158, -138] }
+      ],
+      "movable": true
+    },
+    {
+      "id": "fast-left",
+      "kind": "corner",
+      "motif": "long-sweeper",
+      "lengthMetres": [250, 310],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [56, 64] }
+      ],
+      "radiusClass": "fast",
+      "movable": true
+    },
+    {
+      "id": "hairpin-right",
+      "kind": "corner",
+      "motif": "single-apex",
+      "lengthMetres": [145, 175],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-180, -170] }
+      ],
+      "radiusClass": "hairpin",
+      "movable": true
+    },
+    {
+      "id": "return-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-s",
+      "lengthMetres": [300, 360],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [2, 4] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-4, -2] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-180, 180]
+      }
+    },
+    {
+      "id": "last-burst",
+      "kind": "transition",
+      "motif": "sweeper-chain",
+      "lengthMetres": [340, 410],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-50, -42] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [90, 102] },
+        { "firstKnot": 4, "lastKnot": 6, "angleDegrees": [-50, -42] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-180, 180]
+      }
+    }
+  ]
+}

@@ -16,4 +16,4 @@ for (const seed of [1, 2, 3]) {
   run(['tools/race-sim.js', '--seed', String(seed), '--dry', '--strict']);
   run(['tools/race-sim.js', '--seed', String(seed), '--rain', '--strict']);
 }
-console.log('\nSeason matrix OK: 36 races (6 tracks × 3 seeds × dry/rain)');
+console.log('\nSeason matrix OK: all calendar tracks × 3 seeds × dry/rain');

@@ -1,5 +1,6 @@
 import { PHYS } from '../core/physics';
 import { clamp, lerp } from '../shared/math';
+import { random } from '../shared/rng';
 import { emitToast } from './events';
 import { minRel } from './strategy';
 import type {
@@ -143,6 +144,17 @@ export function pitTrafficReference(
   traveller: Entry,
   session: Session
 ): { entry: Entry; distance: number; reason: PitWaitReason } | null {
+  const phase = pitPhaseOf(traveller);
+  const reservationKey = traveller.pitReservationKey;
+  const reservation = reservationKey
+    ? session.pitReservations?.get(reservationKey)
+    : null;
+  // Granting a crossing reservation transfers right of way to its owner.
+  // Continuing to apply the generic lane follower to that same car can stop
+  // it inside the crossing while every other car waits for its reservation.
+  // Through-lane cars still see the owner below when they query for traffic.
+  if ((phase === 'ingress' || phase === 'egress') && reservation?.owner === traveller)
+    return null;
   const own = pitOccupancy(traveller, session);
   if (!own) return null;
   let result: { entry: Entry; distance: number; reason: PitWaitReason } | null = null;
@@ -308,7 +320,10 @@ export function pitIngressStartW(
 }
 
 export function pitEgressEndW(entry: Entry, session: Session): number {
-  return session.trk.pit.boxWAt(entry.ti) + PIT_EGRESS_DISTANCE;
+  // The lateral path reaches the travel lane after PIT_EGRESS_DISTANCE, but
+  // egress remains the owning phase until the rear of the car has cleared the
+  // reserved crossing (including its one-metre longitudinal uncertainty).
+  return session.trk.pit.boxWAt(entry.ti) + PIT_EGRESS_DISTANCE + 1 + PIT_HALF_LENGTH;
 }
 
 function setPitWait(entry: Entry, reason: PitWaitReason | null, owner: Entry | null): void {
@@ -386,16 +401,15 @@ export function planPitMotion(entry: Entry, session: Session): PitMotionPlan {
   }
 
   const egressEnd = pitEgressEndW(entry, session);
-  if (entry.pitPhase === 'egress' || w < egressEnd) {
+  if (w < egressEnd) {
     const decision = claimPitReservation(entry, session, 'egress', boxW);
     if (!decision.granted) {
       setPitWait(entry, decision.reason, decision.owner);
       return { phase: 'egress', lateral: pit.boxOff, speedCap: 0, stopW: w, queued: false };
     }
     setPitWait(entry, null, null);
-    const u = smootherstep((w - boxW) / Math.max(0.5, egressEnd - boxW));
+    const u = smootherstep((w - boxW) / PIT_EGRESS_DISTANCE);
     const lateral = lerp(pit.boxOff, pit.off(w), u);
-    if (w >= egressEnd - 0.2) releasePitReservation(entry, session);
     return { phase: 'egress', lateral, speedCap: Math.min(5, pit.limit), stopW: null, queued: false };
   }
   releasePitReservation(entry, session);
@@ -459,12 +473,12 @@ export function pitTime(entry: Entry, fix: boolean, session: Session): number {
   entry._mishap = false;
   if (entry.isPlayer) {
     time = 7.6 - session.config.pitSkill * 0.55 + (fix ? 3.5 : 0);
-    if (Math.random() < 0.10 - session.config.pitFocus * 0.015) {
+    if (random() < 0.10 - session.config.pitFocus * 0.015) {
       time += 4;
       entry._mishap = true;
     }
   } else {
-    time = 6.4 + Math.random() * 1.2 + (fix ? 3.5 : 0);
+    time = 6.4 + random() * 1.2 + (fix ? 3.5 : 0);
   }
   return time;
 }

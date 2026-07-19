@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 2,
+  "id": "preset-power-v2",
+  "name": "Power topology grammar",
+  "archetype": "power",
+  "winding": "counter-clockwise",
+  "groups": [
+    {
+      "id": "pit-straight",
+      "kind": "nominal-straight",
+      "motif": "true-straight",
+      "lengthMetres": [1050, 1180],
+      "lobes": [],
+      "movable": false,
+      "role": "grid-pit"
+    },
+    {
+      "id": "slow-left",
+      "kind": "corner",
+      "motif": "decreasing-radius",
+      "lengthMetres": [165, 205],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 3, "angleDegrees": [100, 110] }
+      ],
+      "radiusClass": "slow",
+      "movable": true
+    },
+    {
+      "id": "return-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-bow",
+      "lengthMetres": [820, 960],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [2, 5] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-280, 280],
+        "shallowBendBiasDelta": [-0.5, 0.5]
+      }
+    },
+    {
+      "id": "fast-left",
+      "kind": "corner",
+      "motif": "long-sweeper",
+      "lengthMetres": [330, 390],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [62, 70] }
+      ],
+      "radiusClass": "fast",
+      "movable": true
+    },
+    {
+      "id": "heavy-chicane",
+      "kind": "complex",
+      "motif": "chicane",
+      "lengthMetres": [310, 370],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [84, 96] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-96, -84] }
+      ],
+      "movable": true
+    },
+    {
+      "id": "back-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-s",
+      "lengthMetres": [900, 1030],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [2, 4] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [-4, -2] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-300, 300],
+        "shallowBendBiasDelta": [-0.5, 0.5]
+      }
+    },
+    {
+      "id": "medium-right",
+      "kind": "corner",
+      "motif": "late-apex",
+      "lengthMetres": [170, 220],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-84, -76] }
+      ],
+      "radiusClass": "medium",
+      "movable": true
+    },
+    {
+      "id": "kink-right",
+      "kind": "corner",
+      "motif": "single-apex",
+      "lengthMetres": [135, 175],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-28, -22] }
+      ],
+      "radiusClass": "kink",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-20, 20] }
+        ]
+      }
+    },
+    {
+      "id": "opening-hairpin",
+      "kind": "corner",
+      "motif": "single-apex",
+      "lengthMetres": [145, 175],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [170, 180] }
+      ],
+      "radiusClass": "hairpin",
+      "movable": true
+    },
+    {
+      "id": "third-bow",
+      "kind": "nominal-straight",
+      "motif": "shallow-bow",
+      "lengthMetres": [780, 920],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-4, -2] }
+      ],
+      "movable": false,
+      "flex": {
+        "lengthDeltaMetres": [-260, 260]
+      }
+    },
+    {
+      "id": "closing-sweeper",
+      "kind": "corner",
+      "motif": "long-sweeper",
+      "lengthMetres": [720, 840],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 4, "angleDegrees": [106, 114] }
+      ],
+      "radiusClass": "kink",
+      "movable": true,
+      "flex": {
+        "lobes": [
+          { "lobe": 0, "angleDeltaDegrees": [-24, 24] }
+        ]
+      }
+    },
+    {
+      "id": "sweeper-chain",
+      "kind": "complex",
+      "motif": "sweeper-chain",
+      "lengthMetres": [820, 950],
+      "lobes": [
+        { "firstKnot": 0, "lastKnot": 2, "angleDegrees": [-78, -66] },
+        { "firstKnot": 2, "lastKnot": 4, "angleDegrees": [130, 150] },
+        { "firstKnot": 4, "lastKnot": 6, "angleDegrees": [-64, -53] }
+      ],
+      "movable": true
+    }
+  ]
+}

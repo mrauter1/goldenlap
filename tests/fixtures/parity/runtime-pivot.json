@@ -1,0 +1,411 @@
+{
+  "fixtureSchema": 1,
+  "purpose": "Post-pivot browser, public API, track profile, and seeded-session compatibility contract.",
+  "historicalFixture": "manifest.json",
+  "runtime": {
+    "api": [
+      {
+        "key": "BUILT",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "CALENDAR",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "DRIVERS",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "G",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "PHYS",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "S",
+        "shape": "getter",
+        "writable": false
+      },
+      {
+        "key": "TEAM_DEFS",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "TRACK_DEFS",
+        "shape": "object",
+        "writable": true
+      },
+      {
+        "key": "botStep",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "buildCorners",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "buildTrack",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "collideCars",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "compileResults",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "entryMargin",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "makeCar",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "nextCorner",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "pickTeam",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "playerEntry",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "qualiBox",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "qualiEnd",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "qualiSend",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "raceLapsFor",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "racingLine",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "setScale",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "sheetAction",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "speedProfile",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "startRace",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "startWeekend",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "stepCar",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "stepSession",
+        "shape": "function",
+        "writable": true
+      },
+      {
+        "key": "trackSense",
+        "shape": "function",
+        "writable": true
+      }
+    ],
+    "data": {
+      "calendar": [
+        [
+          0,
+          "PRADO VERDE GP",
+          0.15
+        ],
+        [
+          1,
+          "COSTA DO SOL GP",
+          0.25
+        ],
+        [
+          2,
+          "NORDWALD GP",
+          0.55
+        ],
+        [
+          3,
+          "VILLA REALE GP",
+          0.35
+        ],
+        [
+          4,
+          "ANHEMBI GP",
+          0.15
+        ],
+        [
+          5,
+          "GRAN PREMIO CERRO ALTO",
+          0.6
+        ],
+        [
+          6,
+          "ARDENNE CREST GP",
+          0.5
+        ],
+        [
+          7,
+          "PAULISTA LOOP GP",
+          0.35
+        ]
+      ],
+      "drivers": [
+        [
+          "BAR",
+          "Rui Barreto"
+        ],
+        [
+          "ROC",
+          "Émile Rocard"
+        ],
+        [
+          "VAL",
+          "Tommy Vale"
+        ],
+        [
+          "ADL",
+          "Heinz Adler"
+        ],
+        [
+          "VAN",
+          "Nikos Vane"
+        ],
+        [
+          "CRU",
+          "Beto Cruz"
+        ],
+        [
+          "MOR",
+          "Sal Moreno"
+        ],
+        [
+          "MIL",
+          "Jack Mills"
+        ]
+      ],
+      "teams": [
+        [
+          "aurelio",
+          "Scuderia Aurelio"
+        ],
+        [
+          "wolfe",
+          "Wolfe Racing"
+        ],
+        [
+          "tropical",
+          "Garagem Tropical"
+        ],
+        [
+          "konig",
+          "Königsblau GP"
+        ],
+        [
+          "falcon",
+          "Falcon-Nash"
+        ],
+        [
+          "eclair",
+          "Éclair Bleue"
+        ]
+      ]
+    },
+    "dom": {
+      "canvas": true,
+      "hud": true,
+      "menu": true,
+      "sheet": true,
+      "title": "Golden Lap — Team Manager"
+    },
+    "numericNormalization": "round-to-1e-8, FNV-1a UTF-16 token stream",
+    "schema": 1,
+    "seed": 334462,
+    "seeded": {
+      "gameBefore": {
+        "menuDisplay": "flex",
+        "phase": "menu",
+        "round": 0,
+        "teamCards": 3,
+        "teamI": -1
+      },
+      "gameReady": {
+        "drivers": [
+          0,
+          1
+        ],
+        "money": 24,
+        "phase": "quali",
+        "philosophy": 0,
+        "round": 0,
+        "sponsor": 0,
+        "staff": [
+          0,
+          0
+        ],
+        "teamI": 0
+      },
+      "session": {
+        "entryHash": "a107a2c5",
+        "mode": "quali",
+        "phase": "run",
+        "states": {
+          "box": 12
+        },
+        "t": 5,
+        "wet": 0
+      }
+    },
+    "tracks": [
+      {
+        "centerLapTime": 57.4223175,
+        "cornersHash": "f98c28b0",
+        "id": "prado",
+        "len": 2751.29537197,
+        "lineLapTime": 56.5695424,
+        "n": 1376,
+        "pitHash": "73524e07",
+        "profileHash": "d7021ca3",
+        "samplesHash": "3b0256c3",
+        "step": 1.99948792
+      },
+      {
+        "centerLapTime": 65.91122314,
+        "cornersHash": "60fc0ba5",
+        "id": "costa",
+        "len": 3538.64870419,
+        "lineLapTime": 64.25599819,
+        "n": 1769,
+        "pitHash": "b202743a",
+        "profileHash": "07dc1f53",
+        "samplesHash": "3e05ce38",
+        "step": 2.00036671
+      },
+      {
+        "centerLapTime": 82.10522918,
+        "cornersHash": "ec8776a7",
+        "id": "nordwald",
+        "len": 4404.6979973,
+        "lineLapTime": 80.05550127,
+        "n": 2202,
+        "pitHash": "b9c8f361",
+        "profileHash": "d277e627",
+        "samplesHash": "fd2d6682",
+        "step": 2.00031698
+      },
+      {
+        "centerLapTime": 64.91179734,
+        "cornersHash": "27c04d19",
+        "id": "villa",
+        "len": 2392.66010921,
+        "lineLapTime": 63.04214882,
+        "n": 1196,
+        "pitHash": "fb023824",
+        "profileHash": "e39d3bf4",
+        "samplesHash": "766a7d3c",
+        "step": 2.00055193
+      },
+      {
+        "centerLapTime": 71.97440073,
+        "cornersHash": "c833b81f",
+        "id": "anhembi",
+        "len": 3624.97740149,
+        "lineLapTime": 70.69086879,
+        "n": 1812,
+        "pitHash": "6364de91",
+        "profileHash": "6a480109",
+        "samplesHash": "2efb8331",
+        "step": 2.0005394
+      },
+      {
+        "centerLapTime": 71.24642971,
+        "cornersHash": "96248167",
+        "id": "cerro",
+        "len": 3449.88735226,
+        "lineLapTime": 69.44574545,
+        "n": 1725,
+        "pitHash": "f89bf1eb",
+        "profileHash": "4b5a6403",
+        "samplesHash": "88f2cb29",
+        "step": 1.9999347
+      },
+      {
+        "centerLapTime": 110.47072423,
+        "cornersHash": "ca408753",
+        "id": "ardenne",
+        "len": 7037.12809541,
+        "lineLapTime": 109.3249991,
+        "n": 3519,
+        "pitHash": "67c55832",
+        "profileHash": "1932b5de",
+        "samplesHash": "acceda69",
+        "step": 1.99975223
+      },
+      {
+        "centerLapTime": 86.11029509,
+        "cornersHash": "90ebf388",
+        "id": "paulista",
+        "len": 4721.69022054,
+        "lineLapTime": 85.21922326,
+        "n": 2361,
+        "pitHash": "59a02d99",
+        "profileHash": "3e77a6fc",
+        "samplesHash": "483744db",
+        "step": 1.99986879
+      }
+    ]
+  }
+}

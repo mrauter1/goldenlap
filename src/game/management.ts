@@ -1,5 +1,6 @@
 import { CHIEFS, DRIVERS, ENGINEERS, PHILS } from '../data/personnel';
 import { TEAM_DEFS } from '../data/teams';
+import { random } from '../shared/rng';
 import type { CarPartKey, GameState } from './model';
 import type { TyreCompound } from '../session/model';
 
@@ -124,7 +125,7 @@ export function advanceTuning(state: GameState, gaugeIndex: number): TuningCue {
     return 'none';
   tuning.pts--;
   const precision = ENGINEERS[state.eng]!.prec;
-  gauge.pos = Math.min(100, gauge.pos + 8 + Math.random() * (24 - precision * 3));
+  gauge.pos = Math.min(100, gauge.pos + 8 + random() * (24 - precision * 3));
   if (gauge.pos > gauge.w1) gauge.st = 'over';
   else if (gauge.pos >= gauge.w0) gauge.st = 'golden';
   recalculateTuningBonus(state);

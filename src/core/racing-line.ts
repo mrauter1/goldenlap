@@ -1,9 +1,16 @@
 import { clamp, lerp, normAng } from '../shared/math';
-import { PHYS } from './physics';
+import { cornerSpeedForGrip, PHYS } from './physics';
+import {
+  normalLateralEnvelope,
+  normalLateralIsLegal,
+  roadLateralEnvelope,
+  roadLateralEnvelopeAt,
+  surfaceExposureAtLateral
+} from './surface';
 import {
   denseArray, integerArray, numericArray,
   type DenseArray, type LegacyCorner, type NumericArray, type PathGeometry,
-  type PathMode, type SampledPath, type SpeedProfile, type Track
+  type PathMode, type SampledPath, type SpeedProfile, type Track, type TrackProfile
 } from './model';
 
 /**
@@ -13,7 +20,7 @@ import {
  * been detected.
  */
 export function legacyRacingLine(track: Track): SampledPath {
-  const N = track.n, S = 4, lim = Math.max(0, track.hw - 1.6);
+  const N = track.n, S = 4;
   let off = numericArray(N);
   // Pull every sample toward the chord across its neighbours. Iterating the
   // local projection produces the familiar outside-apex-outside path while
@@ -30,7 +37,12 @@ export function legacyRacingLine(track: Track): SampledPath {
         Math.max(1e-9, dx * dx + dy * dy), 0, 1);
       const tx = px + dx * u, ty = py + dy * u;
       const target = (tx - track.x[i]!) * track.nx[i]! + (ty - track.y[i]!) * track.ny[i]!;
-      off[i] = clamp(off[i]! + (target - off[i]!) * 0.25, -lim, lim);
+      const envelope = normalLateralEnvelope(track, i);
+      off[i] = clamp(
+        off[i]! + (target - off[i]!) * 0.25,
+        envelope.minimum,
+        envelope.maximum
+      );
     }
   }
   const sm = numericArray(N);
@@ -82,7 +94,7 @@ export function legacyRacingLine(track: Track): SampledPath {
     for (let d = -3; d <= 3; d++) sum += rawK[(i + d + N) % N]!;
     k[i] = sum / 7;
   }
-  const profile = speedProfile(track, { k, ds });
+  const profile = speedProfile(track, { k, ds, off });
   return { mode: 'ideal', off, k, ds, v: profile.v };
 }
 
@@ -120,8 +132,6 @@ export function materializePath(
   const count = track.n;
   const x = numericArray(count);
   const y = numericArray(count);
-  const tx = numericArray(count);
-  const ty = numericArray(count);
   const heading = numericArray(count);
   const rawCurvature = numericArray(count);
   const curvature = numericArray(count);
@@ -136,10 +146,10 @@ export function materializePath(
     distance[index] = Math.max(0.1, Math.hypot(x[next]! - x[index]!, y[next]! - y[index]!));
     const dx = x[next]! - x[previous]!;
     const dy = y[next]! - y[previous]!;
-    const length = Math.max(1e-9, Math.hypot(dx, dy));
-    tx[index] = dx / length;
-    ty[index] = dy / length;
-    heading[index] = Math.atan2(ty[index]!, tx[index]!);
+    // atan2 is invariant under positive scalar division. The normalized
+    // tangent arrays were not part of SampledPath, so allocating them and
+    // computing a second hypot per sample had no observable purpose.
+    heading[index] = Math.atan2(dy, dx);
   }
   for (let index = 0; index < count; index++) {
     const previous = (index - 1 + count) % count;
@@ -153,7 +163,7 @@ export function materializePath(
       sum += rawCurvature[(index + delta + count) % count]!;
     curvature[index] = sum / 7;
   }
-  const profile = speedProfile(track, { k: curvature, ds: distance });
+  const profile = speedProfile(track, { k: curvature, ds: distance, off });
   return { mode, off, k: curvature, ds: distance, v: profile.v };
 }
 
@@ -174,6 +184,7 @@ interface IdealLineCandidate {
   timing: SpeedProfile;
   planned: DenseArray<PlannedCornerAnchor>;
   spanLimit: number;
+  lateralUtilization: number;
   maxHeadingStep: number;
 }
 
@@ -187,15 +198,12 @@ export interface IdealLinePreview {
     trackOutI: number;
   }>;
   spanLimit: number;
+  lateralUtilization: number;
   maxHeadingStep: number;
 }
 
 function cyclicIndex(track: Track, index: number): number {
   return ((Math.round(index) % track.n) + track.n) % track.n;
-}
-
-function indexAtDistance(track: Track, distance: number): number {
-  return cyclicIndex(track, distance / track.step);
 }
 
 function distanceAhead(track: Track, from: number, to: number): number {
@@ -234,15 +242,83 @@ function buildOffsetPath(track: Track, sourceAnchors: readonly LineAnchor[]): Sa
   return materializePath(track, off, 'ideal');
 }
 
-function neutralLineAnchors(track: Track): DenseArray<LineAnchor> {
+export function materializeTrackProfile(track: Track, profile: TrackProfile): SampledPath {
+  if (profile.schemaVersion !== 1)
+    throw new Error(`Unsupported profile schema ${String(profile.schemaVersion)}`);
+  if (profile.trackId !== track.def.id)
+    throw new Error(`Profile ${profile.trackId} does not match track ${track.def.id}`);
+  if (profile.anchors.length < 2)
+    throw new Error(`Profile ${profile.trackId} needs at least two anchors`);
+  const seen = new Set<number>();
+  const anchors = profile.anchors.map(anchor => {
+    if (!Number.isFinite(anchor.sFraction) || anchor.sFraction < 0 || anchor.sFraction >= 1)
+      throw new Error(`Profile ${profile.trackId} has invalid longitudinal anchor`);
+    const index = cyclicIndex(track, Math.round(anchor.sFraction * track.n));
+    if (!Number.isFinite(anchor.lateral) ||
+        !normalLateralIsLegal(track, index, anchor.lateral))
+      throw new Error(`Profile ${profile.trackId} has out-of-bounds lateral anchor`);
+    if (seen.has(index))
+      throw new Error(`Profile ${profile.trackId} has duplicate sample anchor ${index}`);
+    seen.add(index);
+    return { index, offset: anchor.lateral, priority: 1 };
+  });
+  const path = buildOffsetPath(track, anchors);
+  const timing = speedProfile(track, path);
+  path.v = timing.v;
+  return path;
+}
+
+export function applyPathAuthority(
+  track: Track,
+  path: SampledPath,
+  timing: SpeedProfile = speedProfile(track, path)
+): void {
+  for (const corner of track.corners ?? []) {
+    corner.entryTarget = path.off[corner.turnInI]!;
+    corner.apexTarget = path.off[corner.apexI]!;
+    corner.exitTarget = path.off[corner.trackOutI]!;
+    corner.vApex = timing.v[corner.apexI]!;
+    corner.severity = clamp(1 - corner.vApex / PHYS.vTop, 0, 1);
+    let brakeI = brakingStartForCorner(track, timing.v, corner.apexI);
+    const brakeToApex = distanceAhead(track, brakeI, corner.apexI);
+    const turnInToApex = distanceAhead(track, corner.turnInI, corner.apexI);
+    if (brakeToApex <= turnInToApex)
+      brakeI = cyclicIndex(
+        track,
+        corner.turnInI - Math.max(2, Math.round(12 / track.step))
+      );
+    corner.brakeI = brakeI;
+    corner.approachI = cyclicIndex(
+      track,
+      brakeI - Math.max(3, Math.round(40 / track.step))
+    );
+    corner.exitI = cyclicIndex(
+      track,
+      corner.trackOutI + Math.max(3, Math.round(35 / track.step))
+    );
+    if (!corner.reason.includes('+profile-path-authority'))
+      corner.reason += '+profile-path-authority';
+  }
+  if (track.corners) rebuildCornerLookup(track, track.corners);
+}
+
+function neutralLineRequiredAt(track: Track, index: number): boolean {
   const pitStart = ((track.pit.sEntry - 80) % track.len + track.len) % track.len;
   const pitEnd = (track.pit.sExit + 30) % track.len;
-  return [
-    { index: indexAtDistance(track, pitStart), offset: 0, priority: 100 },
-    { index: indexAtDistance(track, pitEnd), offset: 0, priority: 100 },
-    { index: indexAtDistance(track, track.len - 25), offset: 0, priority: 100 },
-    { index: indexAtDistance(track, 25), offset: 0, priority: 100 }
-  ] as DenseArray<LineAnchor>;
+  const pitSpan = ((pitEnd - pitStart) % track.len + track.len) % track.len;
+  const s = cyclicIndex(track, index) * track.step;
+  const startDistance = Math.min(s, track.len - s);
+  const pitPosition = ((s - pitStart) % track.len + track.len) % track.len;
+  return startDistance <= 24 ||
+    (pitPosition > track.step && pitPosition < pitSpan - track.step);
+}
+
+function neutralLineAnchors(track: Track): DenseArray<LineAnchor> {
+  const anchors = denseArray<LineAnchor>();
+  for (let index = 0; index < track.n; index++)
+    if (neutralLineRequiredAt(track, index))
+      anchors.push({ index, offset: 0, priority: 100 });
+  return anchors;
 }
 
 function chooseComplexPrimary(
@@ -298,7 +374,6 @@ function maxPathHeadingStep(track: Track, path: SampledPath): number {
 }
 
 function candidateIsSafe(track: Track, candidate: IdealLineCandidate): boolean {
-  const usableHalfWidth = track.hw - PHYS.carWid / 2 - 0.6;
   if (!Number.isFinite(candidate.timing.lapTime) || candidate.maxHeadingStep > 0.18) return false;
   for (let index = 0; index < track.n; index++) {
     const offset = candidate.path.off[index]!;
@@ -307,7 +382,7 @@ function candidateIsSafe(track: Track, candidate: IdealLineCandidate): boolean {
     const speed = candidate.path.v[index]!;
     if (!Number.isFinite(offset) || !Number.isFinite(curvature) ||
         !Number.isFinite(distance) || !Number.isFinite(speed)) return false;
-    if (Math.abs(offset) > usableHalfWidth + 1e-6 || distance < 0.2) return false;
+    if (!normalLateralIsLegal(track, index, offset) || distance < 0.2) return false;
   }
   return true;
 }
@@ -316,11 +391,23 @@ function buildIdealLineCandidate(
   track: Track,
   centerProfile: SpeedProfile,
   representatives: readonly LegacyCorner[],
-  spanLimit: number
+  spanLimit: number,
+  lateralUtilization: number
 ): IdealLineCandidate {
-  const usableHalfWidth = track.hw - PHYS.carWid / 2 - 0.6;
   const planned = denseArray<PlannedCornerAnchor>();
   const anchors = neutralLineAnchors(track);
+  const envelopeTarget = (
+    sample: number,
+    direction: -1 | 1,
+    roadFraction: number
+  ): number => {
+    const envelope = normalLateralEnvelope(track, sample);
+    const road = roadLateralEnvelopeAt(track, sample);
+    const roadTarget = (direction > 0 ? road.maximum : road.minimum) * roadFraction;
+    return direction > 0
+      ? Math.min(envelope.maximum, roadTarget)
+      : Math.max(envelope.minimum, roadTarget);
+  };
   for (let index = 0; index < representatives.length; index++) {
     const corner = representatives[index]!;
     const previous = representatives[(index - 1 + representatives.length) % representatives.length]!;
@@ -331,9 +418,27 @@ function buildIdealLineCandidate(
     const trackOutI = cyclicIndex(track, corner.apexI + Math.round(Math.max(24, after) / track.step));
     planned.push({ corner, turnInI, trackOutI });
     anchors.push(
-      { index: turnInI, offset: -corner.side * usableHalfWidth * 0.45, priority: 70 },
-      { index: corner.apexI, offset: corner.side * usableHalfWidth * 0.55, priority: 80 },
-      { index: trackOutI, offset: -corner.side * usableHalfWidth * 0.35, priority: 70 }
+      {
+        index: turnInI,
+        offset: envelopeTarget(
+          turnInI, -corner.side as -1 | 1, lateralUtilization
+        ),
+        priority: 70
+      },
+      {
+        index: corner.apexI,
+        offset: envelopeTarget(
+          corner.apexI, corner.side, 1.225 * lateralUtilization
+        ),
+        priority: 80
+      },
+      {
+        index: trackOutI,
+        offset: envelopeTarget(
+          trackOutI, -corner.side as -1 | 1, 0.78 * lateralUtilization
+        ),
+        priority: 70
+      }
     );
   }
   const path = buildOffsetPath(track, anchors);
@@ -344,12 +449,17 @@ function buildIdealLineCandidate(
     timing,
     planned,
     spanLimit,
+    lateralUtilization,
     maxHeadingStep: maxPathHeadingStep(track, path)
   };
 }
 
 /** Pure Phase 9 tuning/validation surface; it does not mutate corner plans. */
-export function previewIdealLine(track: Track, spanLimit: number): IdealLinePreview {
+export function previewIdealLine(
+  track: Track,
+  spanLimit: number,
+  lateralUtilization = 0.45
+): IdealLinePreview {
   if (!track.corners?.length)
     throw new Error(`Semantic corners must exist before previewing ${track.def.id}`);
   const centerProfile = speedProfile(track);
@@ -357,7 +467,8 @@ export function previewIdealLine(track: Track, spanLimit: number): IdealLinePrev
     track,
     centerProfile,
     lineRepresentatives(track, centerProfile),
-    spanLimit
+    spanLimit,
+    lateralUtilization
   );
   return {
     path: candidate.path,
@@ -369,6 +480,7 @@ export function previewIdealLine(track: Track, spanLimit: number): IdealLinePrev
       trackOutI: plan.trackOutI
     })) as IdealLinePreview['phaseMarkers'],
     spanLimit: candidate.spanLimit,
+    lateralUtilization: candidate.lateralUtilization,
     maxHeadingStep: candidate.maxHeadingStep
   };
 }
@@ -395,11 +507,18 @@ function applyIdealLinePlan(
     if (corner.complexId) {
       corner.planRole = 'complex-primary';
       corner.compromised = true;
-      corner.reason += `+complex-primary-span-${candidate.spanLimit}m`;
+      corner.reason +=
+        `+complex-primary-span-${candidate.spanLimit}m-u${candidate.lateralUtilization}`;
     } else {
       corner.planRole = 'isolated';
-      corner.compromised = false;
-      corner.reason += `+explicit-oao-span-${candidate.spanLimit}m`;
+      corner.compromised = [
+        corner.turnInI,
+        corner.apexI,
+        corner.trackOutI
+      ].some(index => neutralLineRequiredAt(track, index));
+      corner.reason += corner.compromised
+        ? '+protected-neutral-line'
+        : `+explicit-oao-span-${candidate.spanLimit}m-u${candidate.lateralUtilization}`;
     }
   }
   for (const corner of track.corners || []) {
@@ -416,30 +535,39 @@ function applyIdealLinePlan(
 }
 
 function semanticIdealLine(track: Track): SampledPath {
-  const usableHalfWidth = track.hw - PHYS.carWid / 2 - 0.6;
-  if (!(usableHalfWidth > 0))
+  const initialEnvelope = normalLateralEnvelope(track, 0);
+  if (!(initialEnvelope.maximum > 0 && initialEnvelope.minimum < 0))
     throw new Error(`Track ${track.def.id} is too narrow for a safe racing line`);
   if (!track.corners?.length) return legacyRacingLine(track);
   const centerProfile = speedProfile(track);
   const representatives = lineRepresentatives(track, centerProfile);
   if (!representatives.length) return legacyRacingLine(track);
   const spanLimits = [35, 40, 45, 50, 55, 60, 65, 70, 80, 90, 110, 130, 160] as const;
+  const lateralUtilizations = [0.45, 0.55, 0.7, 0.85, 1, 1.1, 1.2] as const;
   let selected: IdealLineCandidate | null = null;
   for (const spanLimit of spanLimits) {
-    const candidate = buildIdealLineCandidate(
-      track,
-      centerProfile,
-      representatives,
-      spanLimit
-    );
-    if (!candidateIsSafe(track, candidate)) continue;
-    if (!selected || candidate.timing.lapTime < selected.timing.lapTime - 1e-9 ||
-        (Math.abs(candidate.timing.lapTime - selected.timing.lapTime) <= 1e-9 &&
-          candidate.spanLimit < selected.spanLimit)) selected = candidate;
+    for (const lateralUtilization of lateralUtilizations) {
+      const candidate = buildIdealLineCandidate(
+        track,
+        centerProfile,
+        representatives,
+        spanLimit,
+        lateralUtilization
+      );
+      if (!candidateIsSafe(track, candidate)) continue;
+      if (!selected || candidate.timing.lapTime < selected.timing.lapTime - 1e-9 ||
+          (Math.abs(candidate.timing.lapTime - selected.timing.lapTime) <= 1e-9 &&
+            (candidate.spanLimit < selected.spanLimit ||
+              (candidate.spanLimit === selected.spanLimit &&
+                candidate.lateralUtilization < selected.lateralUtilization)))) selected = candidate;
+    }
   }
   if (!selected)
     throw new Error(`No safe semantic ideal-line plan for ${track.def.id}`);
   applyIdealLinePlan(track, selected, centerProfile);
+  // The selected plan moves turn-in/track-out markers. Rebuild every derived
+  // O(1) corner lookup from those final markers before exposing the path.
+  rebuildCornerLookup(track, track.corners);
   return selected.path;
 }
 
@@ -449,35 +577,39 @@ export function racingLine(track: Track): SampledPath {
 
 export function speedProfile(
   track: Track,
-  path?: Pick<SampledPath, 'k' | 'ds'>
+  path?: Pick<SampledPath, 'k' | 'ds'> & Partial<Pick<SampledPath, 'off'>>
 ): SpeedProfile {
   const P = PHYS, N = track.n;
   const pathK = path && path.k ? path.k : track.kSm;
   const pathDs = path && path.ds ? path.ds : null;
   const dsAt = (i: number): number => pathDs ? pathDs[i]! : track.step;
-  const muP = P.mu * P.profMu;
-  const cc = muP * P.kDf / P.m;
-  const vCapSq = P.dfMax / P.kDf; // above this v^2, downforce is capped
+  const surfaceMu = path?.off ? numericArray(N) : null;
+  const surfaceDrag = path?.off ? numericArray(N) : null;
+  if (path?.off) {
+    for (let index = 0; index < N; index++) {
+      const exposure = surfaceExposureAtLateral(track, index, path.off[index]!);
+      surfaceMu![index] = exposure.mu;
+      surfaceDrag![index] = exposure.drag;
+    }
+  }
+  const surfaceMuAt = (index: number): number => surfaceMu?.[index] ?? 1;
+  const surfaceDragAt = (index: number): number => surfaceDrag?.[index] ?? 0;
   const vmax = numericArray(N), v = numericArray(N);
   for (let i = 0; i < N; i++){
-    const k = Math.abs(pathK[i]!);
-    let vm = P.vTop;
-    if (k > 1e-9){
-      const un = (k > cc + 1e-9) ? muP * P.g / (k - cc) : Infinity; // uncapped-aero solution v^2
-      if (un <= vCapSq) vm = Math.sqrt(un);
-      else vm = Math.sqrt(muP * (P.g + P.dfMax / P.m) / k); // capped-aero regime
-    }
-    vmax[i] = Math.min(P.vTop, vm);
+    vmax[i] = cornerSpeedForGrip(pathK[i]!, surfaceMuAt(i));
   }
   v.set(vmax);
-  const gEff = (s: number): number => muP * (P.g + Math.min(P.kDf * s * s, P.dfMax) / P.m);
+  const gEff = (index: number, speed: number): number =>
+    P.mu * P.profMu * surfaceMuAt(index) *
+    (P.g + Math.min(P.kDf * speed * speed, P.dfMax) / P.m);
   const fwd = (): void => {
     for (let i = 0; i < N; i++){
       const j = (i + 1) % N;
-      const vi = v[i]!, aAv = gEff(vi), aLat = vi * vi * Math.abs(pathK[i]!);
+      const vi = v[i]!, aAv = gEff(i, vi), aLat = vi * vi * Math.abs(pathK[i]!);
       const room = Math.sqrt(Math.max(0, aAv * aAv - aLat * aLat));
       const eng = Math.max(0,
-        (Math.min(P.Fmax * P.tc, P.power / Math.max(vi, 4)) - (P.kDrag * vi * vi + P.kRoll)) / P.m);
+        (Math.min(P.Fmax * P.tc, P.power / Math.max(vi, 4)) -
+          (P.kDrag * vi * vi + P.kRoll + surfaceDragAt(i) * vi)) / P.m);
       const a = Math.min(eng, room);
       v[j] = Math.min(v[j]!, Math.sqrt(vi * vi + 2 * a * dsAt(i)));
     }
@@ -485,7 +617,8 @@ export function speedProfile(
   const bwd = (): void => {
     for (let i = N - 1; i >= 0; i--){
       const j = (i + 1) % N;
-      const vj = v[j]!, aAv = gEff(vj) * P.brkFrac, aLat = vj * vj * Math.abs(pathK[j]!);
+      const vj = v[j]!, aAv = gEff(j, vj) * P.brkFrac,
+        aLat = vj * vj * Math.abs(pathK[j]!);
       const room = Math.sqrt(Math.max(0, aAv * aAv - aLat * aLat));
       v[i] = Math.min(v[i]!, Math.sqrt(vj * vj + 2 * room * dsAt(i)));
     }
@@ -608,7 +741,11 @@ function curvatureRegionAround(
   return { startI, endI, side, peak, headingChange };
 }
 
-function brakingStart(track: Track, speeds: NumericArray, apexI: number): number {
+export function brakingStartForCorner(
+  track: Track,
+  speeds: NumericArray,
+  apexI: number
+): number {
   let brakeI = apexI;
   const limit = Math.min(track.n / 3, Math.ceil(260 / track.step));
   for (let count = 0; count < limit; count++) {
@@ -647,6 +784,7 @@ function curvatureDefinedCandidates(
 
 function rebuildCornerLookup(track: Track, corners: readonly LegacyCorner[]): void {
   const lookup = integerArray(track.n);
+  const brakingThreat = numericArray(track.n);
   lookup.fill(-1);
   for (let index = 0; index < track.n; index++) {
     let bestDistance = Infinity;
@@ -660,7 +798,20 @@ function rebuildCornerLookup(track: Track, corners: readonly LegacyCorner[]): vo
     }
     lookup[index] = bestCorner;
   }
+  for (const corner of corners) {
+    const approachSpan = (corner.brakeI - corner.approachI + track.n) % track.n;
+    for (let delta = 0; delta <= approachSpan; delta++) {
+      const u = approachSpan > 0 ? delta / approachSpan : 1;
+      const eased = u * u * u * (u * (u * 6 - 15) + 10);
+      const index = (corner.approachI + delta) % track.n;
+      brakingThreat[index] = Math.max(brakingThreat[index]!, eased);
+    }
+    const brakingSpan = (corner.turnInI - corner.brakeI + track.n) % track.n;
+    for (let delta = 0; delta <= brakingSpan; delta++)
+      brakingThreat[(corner.brakeI + delta) % track.n] = 1;
+  }
   track.cornerNext = lookup;
+  track.brakingThreat = brakingThreat;
 }
 
 function assignCornerComplexes(track: Track, corners: DenseArray<LegacyCorner>): void {
@@ -721,8 +872,8 @@ export function detectSemanticCorners(
   track: Track,
   centerProfile: SpeedProfile
 ): DenseArray<LegacyCorner> {
-  const usableHalfWidth = track.hw - PHYS.carWid / 2 - 0.6;
-  if (!(usableHalfWidth > 0))
+  const initialEnvelope = normalLateralEnvelope(track, 0);
+  if (!(initialEnvelope.maximum > 0 && initialEnvelope.minimum < 0))
     throw new Error(`Track ${track.def.id} is too narrow for semantic corner targets`);
   const centerPath = { v: centerProfile.v, k: track.kSm };
   const speedCandidates = frozenCornerCandidates(track, centerPath);
@@ -742,12 +893,16 @@ export function detectSemanticCorners(
   const corners = accepted.map((candidate, index) => {
     const region = curvatureRegionAround(track, candidate.apexI, candidate.side);
     const apexI = candidate.apexI;
-    let brakeI = brakingStart(track, centerProfile.v, apexI);
+    let brakeI = brakingStartForCorner(track, centerProfile.v, apexI);
     const initialTurnInI = cyclicIndex(track, region.startI - Math.max(2, Math.round(12 / track.step)));
     if (distanceAhead(track, brakeI, apexI) <= distanceAhead(track, initialTurnInI, apexI))
       brakeI = cyclicIndex(track, initialTurnInI - Math.max(2, Math.round(12 / track.step)));
     const trackOutI = cyclicIndex(track, region.endI + Math.max(2, Math.round(12 / track.step)));
     const side = region.side;
+    const target = (sample: number, direction: -1 | 1, fraction: number): number => {
+      const envelope = roadLateralEnvelopeAt(track, sample);
+      return (direction > 0 ? envelope.maximum : envelope.minimum) * fraction;
+    };
     return {
       id: `${track.def.id}-c${String(index + 1).padStart(2, '0')}`,
       regionStartI: region.startI,
@@ -759,13 +914,14 @@ export function detectSemanticCorners(
       trackOutI,
       exitI: cyclicIndex(track, trackOutI + Math.max(3, Math.round(35 / track.step))),
       vApex: centerProfile.v[apexI]!,
+      passScore: 0,
       side,
       severity: clamp(1 - centerProfile.v[apexI]! / PHYS.vTop, 0, 1),
       complexId: null,
       isolated: true,
-      entryTarget: -side * usableHalfWidth * 0.45,
-      apexTarget: side * usableHalfWidth * 0.55,
-      exitTarget: -side * usableHalfWidth * 0.35,
+      entryTarget: target(initialTurnInI, -side as -1 | 1, 0.45),
+      apexTarget: target(apexI, side, 0.55),
+      exitTarget: target(trackOutI, -side as -1 | 1, 0.35),
       legacyCandidateIndices: denseArray<number>(),
       planRole: 'isolated',
       compromised: false,
@@ -816,6 +972,17 @@ export function refineSemanticCorners(
       throw new Error(
         `Frozen corner candidate ${candidate.apexI} on ${track.def.id} mapped ${mapped.get(candidate.apexI) ?? 0} times`
       );
+  }
+  for (const corner of corners) {
+    const envelope = normalLateralEnvelope(track, corner.apexI);
+    const twoWideRoom = Math.max(
+      0,
+      envelope.maximum - envelope.minimum - 2 * PHYS.carWid
+    );
+    const approachSpeed = legacyLine.v[corner.brakeI]!;
+    const brakingZone = distanceAhead(track, corner.brakeI, corner.turnInI);
+    const brakingDelta = Math.max(0, approachSpeed - corner.vApex);
+    corner.passScore = approachSpeed * brakingZone * brakingDelta * twoWideRoom;
   }
   rebuildCornerLookup(track, corners);
   return corners;

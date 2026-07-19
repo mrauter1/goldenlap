@@ -1,0 +1,6 @@
+{"ts": "2026-07-18T19:45:18.547797+00:00", "run_id": "run-20260718T194518Z-39d1d47e", "seq": 1, "event_type": "run_started", "workspace": "/home/marcelo/code/goldenlap", "pairs": ["implement", "test"], "max_iterations": 15, "use_git": false, "task_id": "racecraft-cost-function-pa", "task_root": ".superloop/tasks/racecraft-cost-function-pa"}
+{"ts": "2026-07-18T19:45:18.548874+00:00", "run_id": "run-20260718T194518Z-39d1d47e", "seq": 2, "event_type": "phase_scope_resolved", "phase_mode": "single", "phase_ids": ["implicit-phase"], "explicit": false, "current_phase_index": 0}
+{"ts": "2026-07-18T19:45:18.550016+00:00", "run_id": "run-20260718T194518Z-39d1d47e", "seq": 3, "event_type": "phase_started", "phase_id": "implicit-phase", "phase_mode": "single"}
+{"ts": "2026-07-18T19:45:18.550123+00:00", "run_id": "run-20260718T194518Z-39d1d47e", "seq": 4, "event_type": "pair_started", "pair": "implement", "phase_id": "implicit-phase"}
+{"ts": "2026-07-18T19:45:18.550159+00:00", "run_id": "run-20260718T194518Z-39d1d47e", "seq": 5, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1, "phase_id": "implicit-phase"}
+{"ts": "2026-07-18T19:45:21.440344+00:00", "run_id": "run-20260718T194518Z-39d1d47e", "seq": 6, "event_type": "run_finished", "status": "fatal_error", "exit_code": 1}

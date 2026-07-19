@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { SampledPath, SpeedProfile, Track } from '../../../src/core/model';
-import { PHYS } from '../../../src/core/physics';
+import {
+  normalLateralIsLegal,
+  roadLateralEnvelope
+} from '../../../src/core/surface';
 import {
   derivePathGeometry,
   detectSemanticCorners,
@@ -15,7 +18,7 @@ import { buildTrack } from '../../../src/core/track';
 import { PIT_TEAMS, TRACK_DEFS } from '../../../src/data/tracks';
 
 interface SemanticTrack {
-  track: Track & Required<Pick<Track, 'corners' | 'cornerNext'>>;
+  track: Track & Required<Pick<Track, 'corners' | 'cornerNext' | 'brakingThreat'>>;
   centerProfile: SpeedProfile;
   legacyPath: SampledPath;
   idealPath: SampledPath;
@@ -32,7 +35,7 @@ function buildSemanticTrack(definitionIndex: number): SemanticTrack {
   const idealPath = racingLine(track);
   const idealProfile = speedProfile(track, idealPath);
   idealPath.v = idealProfile.v;
-  if (!track.corners || !track.cornerNext)
+  if (!track.corners || !track.cornerNext || !track.brakingThreat)
     throw new Error(`Semantic build did not initialize ${definition.id}`);
   return {
     track: track as SemanticTrack['track'],
@@ -109,6 +112,12 @@ describe('semantic corner map', () => {
         }
         expect(Math.sign(track.kSm[corner.apexI]!) || corner.side).toBe(corner.side);
         expect(corner.reason).toContain('signed-curvature-region');
+        expect(track.brakingThreat[corner.brakeI]).toBe(1);
+        expect(track.brakingThreat[corner.turnInI]).toBe(1);
+      }
+      for (const threat of track.brakingThreat) {
+        expect(threat).toBeGreaterThanOrEqual(0);
+        expect(threat).toBeLessThanOrEqual(1);
       }
     }
   });
@@ -118,7 +127,8 @@ describe('explicit ideal line', () => {
   test('meets isolated targets and every declared complex target exactly', () => {
     for (let definitionIndex = 0; definitionIndex < TRACK_DEFS.length; definitionIndex++) {
       const { track, idealPath } = buildSemanticTrack(definitionIndex);
-      const usableHalfWidth = track.hw - PHYS.carWid / 2 - 0.6;
+      const roadEnvelope = roadLateralEnvelope(track);
+      const usableHalfWidth = roadEnvelope.maximum;
       for (const corner of track.corners) {
         expect(idealPath.off[corner.turnInI]!).toBeCloseTo(corner.entryTarget, 10);
         expect(idealPath.off[corner.apexI]!).toBeCloseTo(corner.apexTarget, 10);
@@ -127,6 +137,10 @@ describe('explicit ideal line', () => {
           expect(corner.complexId).not.toBeNull();
           expect(corner.compromised).toBe(true);
           expect(corner.planRole).not.toBe('isolated');
+          continue;
+        }
+        if (corner.compromised) {
+          expect(corner.reason).toContain('+protected-neutral-line');
           continue;
         }
         const entry = corner.side * idealPath.off[corner.turnInI]! / usableHalfWidth;
@@ -142,7 +156,6 @@ describe('explicit ideal line', () => {
   test('is finite, bounded, neutral through pit/start, and no slower than centerline', () => {
     for (let definitionIndex = 0; definitionIndex < TRACK_DEFS.length; definitionIndex++) {
       const { track, centerProfile, idealPath, idealProfile } = buildSemanticTrack(definitionIndex);
-      const usableHalfWidth = track.hw - PHYS.carWid / 2 - 0.6;
       expect(idealProfile.lapTime).toBeLessThanOrEqual(centerProfile.lapTime + 1e-6);
       expect(idealPath.off.length).toBe(track.n);
       expect(idealPath.k.length).toBe(track.n);
@@ -153,7 +166,7 @@ describe('explicit ideal line', () => {
         expect(Number.isFinite(idealPath.k[index]!)).toBe(true);
         expect(Number.isFinite(idealPath.ds[index]!)).toBe(true);
         expect(Number.isFinite(idealPath.v[index]!)).toBe(true);
-        expect(Math.abs(idealPath.off[index]!)).toBeLessThanOrEqual(usableHalfWidth + 1e-6);
+        expect(normalLateralIsLegal(track, index, idealPath.off[index]!)).toBe(true);
         expect(idealPath.ds[index]!).toBeGreaterThan(0.2);
         const s = index * track.step;
         const startDistance = Math.min(s, track.len - s);

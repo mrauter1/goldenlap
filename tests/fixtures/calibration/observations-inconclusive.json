@@ -1,0 +1,10 @@
+{
+  "observations": [
+    {
+      "metric": "priority.qualifying_loss_straight_seconds",
+      "value": 1.2,
+      "samples": 24,
+      "interval": { "lower": 0.8, "upper": 1.7 }
+    }
+  ]
+}

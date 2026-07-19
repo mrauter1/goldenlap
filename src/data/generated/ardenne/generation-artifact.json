@@ -1,0 +1,2056 @@
+{
+  "schemaVersion": 2,
+  "generatorVersion": "trackgen-topology-v2",
+  "signatureSchemaVersion": 2,
+  "seed": 4,
+  "sourceSeed": 4,
+  "attempt": 0,
+  "archetype": "power",
+  "signatureId": "reference-spa-rhythm-v2",
+  "signatureFingerprint": "fnv1a32:16380549",
+  "definitionFingerprint": "fnv1a32:370fffdb",
+  "provenanceHash": "fnv1a32:75016f15",
+  "resolvedPlan": {
+    "schemaVersion": 2,
+    "seed": 4,
+    "signatureId": "reference-spa-rhythm-v2",
+    "archetype": "power",
+    "winding": "counter-clockwise",
+    "groups": [
+      {
+        "id": "source-grid-straight",
+        "kind": "nominal-straight",
+        "motif": "true-straight",
+        "lengthMetres": 1170.072705624625,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 1,
+            "s": 1170.072705624625,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [],
+        "movable": false,
+        "role": "grid-pit"
+      },
+      {
+        "id": "la-source-stop",
+        "kind": "corner",
+        "motif": "decreasing-radius",
+        "lengthMetres": 185.33987416885793,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.42,
+            "s": 77.84274715092033,
+            "curvatureWeight": 0.82
+          },
+          {
+            "at": 0.75,
+            "s": 139.00490562664345,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 1,
+            "s": 185.33987416885793,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 3,
+            "angleDegrees": 105.2876877039671
+          }
+        ],
+        "movable": true,
+        "radiusClass": "slow"
+      },
+      {
+        "id": "eau-rouge-approach",
+        "kind": "nominal-straight",
+        "motif": "shallow-bow",
+        "lengthMetres": 924.0684618521482,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.5,
+            "s": 462.0342309260741,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 1,
+            "s": 924.0684618521482,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": 3.043861312326044
+          }
+        ],
+        "movable": false,
+        "flex": {
+          "lengthDeltaMetres": [
+            -280,
+            280
+          ],
+          "lobes": [],
+          "shallowBendBiasDelta": [
+            -0.5,
+            0.5
+          ]
+        }
+      },
+      {
+        "id": "raidillon-crest",
+        "kind": "corner",
+        "motif": "long-sweeper",
+        "lengthMetres": 377.28542800527066,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.18,
+            "s": 67.91137704094872,
+            "curvatureWeight": 0.72
+          },
+          {
+            "at": 0.5,
+            "s": 188.64271400263533,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 0.82,
+            "s": 309.3740509643219,
+            "curvatureWeight": 0.72
+          },
+          {
+            "at": 1,
+            "s": 377.28542800527066,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 4,
+            "angleDegrees": 68.45817931182683
+          }
+        ],
+        "movable": true,
+        "radiusClass": "fast"
+      },
+      {
+        "id": "les-combes",
+        "kind": "complex",
+        "motif": "chicane",
+        "lengthMetres": 334.25300806295127,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.2,
+            "s": 66.85060161259025,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 0.48,
+            "s": 160.4414438702166,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.72,
+            "s": 240.6621658053249,
+            "curvatureWeight": -1
+          },
+          {
+            "at": 1,
+            "s": 334.25300806295127,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": 88.20032614096999
+          },
+          {
+            "firstKnot": 2,
+            "lastKnot": 4,
+            "angleDegrees": -93.76582392398268
+          }
+        ],
+        "movable": true
+      },
+      {
+        "id": "kemmel-bend",
+        "kind": "nominal-straight",
+        "motif": "shallow-s",
+        "lengthMetres": 985.6294511305168,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.25,
+            "s": 246.4073627826292,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 0.5,
+            "s": 492.8147255652584,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.75,
+            "s": 739.2220883478876,
+            "curvatureWeight": -1
+          },
+          {
+            "at": 1,
+            "s": 985.6294511305168,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": 2.578237358480692
+          },
+          {
+            "firstKnot": 2,
+            "lastKnot": 4,
+            "angleDegrees": -2.4652584940195084
+          }
+        ],
+        "movable": false,
+        "flex": {
+          "lengthDeltaMetres": [
+            -300,
+            300
+          ],
+          "lobes": [],
+          "shallowBendBiasDelta": [
+            -0.5,
+            0.5
+          ]
+        }
+      },
+      {
+        "id": "bruxelles",
+        "kind": "corner",
+        "motif": "late-apex",
+        "lengthMetres": 188.09021579101682,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.66,
+            "s": 124.1395424220711,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 1,
+            "s": 188.09021579101682,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": -77.16911270841956
+          }
+        ],
+        "movable": true,
+        "radiusClass": "medium"
+      },
+      {
+        "id": "no-name-kink",
+        "kind": "corner",
+        "motif": "single-apex",
+        "lengthMetres": 137.88107942789793,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.5,
+            "s": 68.94053971394897,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 1,
+            "s": 137.88107942789793,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": -23.38062687544152
+          }
+        ],
+        "movable": true,
+        "radiusClass": "kink",
+        "flex": {
+          "lobes": [
+            {
+              "lobe": 0,
+              "angleDeltaDegrees": [
+                -20,
+                20
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "campus-turnback",
+        "kind": "corner",
+        "motif": "single-apex",
+        "lengthMetres": 154.2345082317479,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.5,
+            "s": 77.11725411587395,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 1,
+            "s": 154.2345082317479,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": 179.32878795545548
+          }
+        ],
+        "movable": true,
+        "radiusClass": "hairpin"
+      },
+      {
+        "id": "paul-frere-bend",
+        "kind": "nominal-straight",
+        "motif": "shallow-bow",
+        "lengthMetres": 844.1114077297971,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.5,
+            "s": 422.05570386489853,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 1,
+            "s": 844.1114077297971,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": -2.1973502738401294
+          }
+        ],
+        "movable": false,
+        "flex": {
+          "lengthDeltaMetres": [
+            -260,
+            260
+          ],
+          "lobes": []
+        }
+      },
+      {
+        "id": "blanchimont",
+        "kind": "corner",
+        "motif": "long-sweeper",
+        "lengthMetres": 832.3929819278419,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.18,
+            "s": 149.83073674701154,
+            "curvatureWeight": 0.72
+          },
+          {
+            "at": 0.5,
+            "s": 416.19649096392095,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 0.82,
+            "s": 682.5622451808304,
+            "curvatureWeight": 0.72
+          },
+          {
+            "at": 1,
+            "s": 832.3929819278419,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 4,
+            "angleDegrees": 113.49290578626096
+          }
+        ],
+        "movable": true,
+        "radiusClass": "kink",
+        "flex": {
+          "lobes": [
+            {
+              "lobe": 0,
+              "angleDeltaDegrees": [
+                -24,
+                24
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "bus-stop-complex",
+        "kind": "complex",
+        "motif": "sweeper-chain",
+        "lengthMetres": 912.5211789272726,
+        "knots": [
+          {
+            "at": 0,
+            "s": 0,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.16,
+            "s": 146.0033886283636,
+            "curvatureWeight": 1
+          },
+          {
+            "at": 0.32,
+            "s": 292.0067772567272,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.5,
+            "s": 456.2605894636363,
+            "curvatureWeight": -0.72
+          },
+          {
+            "at": 0.66,
+            "s": 602.2639780919999,
+            "curvatureWeight": 0
+          },
+          {
+            "at": 0.84,
+            "s": 766.517790298909,
+            "curvatureWeight": 0.88
+          },
+          {
+            "at": 1,
+            "s": 912.5211789272726,
+            "curvatureWeight": 0
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "angleDegrees": -77.40827822126448
+          },
+          {
+            "firstKnot": 2,
+            "lastKnot": 4,
+            "angleDegrees": 143.80557885859162
+          },
+          {
+            "firstKnot": 4,
+            "lastKnot": 6,
+            "angleDegrees": -63.479346197098494
+          }
+        ],
+        "movable": true
+      }
+    ]
+  },
+  "realization": {
+    "groups": [
+      {
+        "groupId": "source-grid-straight",
+        "groupIndex": 0,
+        "kind": "nominal-straight",
+        "motif": "true-straight",
+        "role": "grid-pit",
+        "pointStart": 0,
+        "pointEnd": 98,
+        "sStart": 0,
+        "sEnd": 1170.072705624625,
+        "targetLengthMetres": 1170.072705624625,
+        "realizedLengthMetres": 1170.072705624625,
+        "entryPose": {
+          "x": 0,
+          "y": 0,
+          "heading": 0
+        },
+        "exitPose": {
+          "x": 1170.072705624625,
+          "y": 0,
+          "heading": 0
+        },
+        "knots": [
+          {
+            "groupId": "source-grid-straight",
+            "knotIndex": 0,
+            "s": 0,
+            "kappa": 0,
+            "pose": {
+              "x": 0,
+              "y": 0,
+              "heading": 0
+            }
+          },
+          {
+            "groupId": "source-grid-straight",
+            "knotIndex": 1,
+            "s": 1170.072705624625,
+            "kappa": 0,
+            "pose": {
+              "x": 1170.072705624625,
+              "y": 0,
+              "heading": 0
+            }
+          }
+        ],
+        "lobes": []
+      },
+      {
+        "groupId": "la-source-stop",
+        "groupIndex": 1,
+        "kind": "corner",
+        "motif": "decreasing-radius",
+        "pointStart": 98,
+        "pointEnd": 115,
+        "sStart": 1170.072705624625,
+        "sEnd": 1355.412579793483,
+        "targetLengthMetres": 185.33987416885793,
+        "realizedLengthMetres": 185.33987416885793,
+        "entryPose": {
+          "x": 1170.072705624625,
+          "y": 0,
+          "heading": 0
+        },
+        "exitPose": {
+          "x": 1276.393357760493,
+          "y": 95.76049851822904,
+          "heading": 1.8376168122457748
+        },
+        "knots": [
+          {
+            "groupId": "la-source-stop",
+            "knotIndex": 0,
+            "s": 1170.072705624625,
+            "kappa": 0,
+            "pose": {
+              "x": 1170.072705624625,
+              "y": 0,
+              "heading": 0
+            }
+          },
+          {
+            "groupId": "la-source-stop",
+            "knotIndex": 1,
+            "s": 1247.9154527755454,
+            "kappa": 0.018219845237352095,
+            "pose": {
+              "x": 1247.194673251302,
+              "y": 6.195080636198905,
+              "heading": 0.380383745006017
+            }
+          },
+          {
+            "groupId": "la-source-stop",
+            "knotIndex": 2,
+            "s": 1309.0776112512685,
+            "kappa": 0.022219323460185486,
+            "pose": {
+              "x": 1284.9402145951112,
+              "y": 50.49613204823896,
+              "heading": 1.4650936045606189
+            }
+          },
+          {
+            "groupId": "la-source-stop",
+            "knotIndex": 3,
+            "s": 1355.412579793483,
+            "kappa": 0,
+            "pose": {
+              "x": 1276.393357760493,
+              "y": 95.76049851822904,
+              "heading": 1.8376168122457748
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 3,
+            "targetAngleDegrees": 105.2876877039671,
+            "realizedAngleDegrees": 105.28768770396711,
+            "targetCharacteristicRadiusMetres": 100.8588259172225,
+            "realizedCharacteristicRadiusMetres": 100.85882591722249,
+            "realizedMinimumRadiusMetres": 45.10907690896274
+          }
+        ]
+      },
+      {
+        "groupId": "eau-rouge-approach",
+        "groupIndex": 2,
+        "kind": "nominal-straight",
+        "motif": "shallow-bow",
+        "pointStart": 115,
+        "pointEnd": 193,
+        "sStart": 1355.412579793483,
+        "sEnd": 2277.165142178134,
+        "targetLengthMetres": 924.0684618521482,
+        "realizedLengthMetres": 921.7525623846508,
+        "entryPose": {
+          "x": 1276.393357760493,
+          "y": 95.76049851822904,
+          "heading": 1.8376168122457748
+        },
+        "exitPose": {
+          "x": 1009.9464090915346,
+          "y": 977.9583953540945,
+          "heading": 1.890605298072694
+        },
+        "knots": [
+          {
+            "groupId": "eau-rouge-approach",
+            "knotIndex": 0,
+            "s": 1355.412579793483,
+            "kappa": 0,
+            "pose": {
+              "x": 1276.393357760493,
+              "y": 95.76049851822904,
+              "heading": 1.8376168122457748
+            }
+          },
+          {
+            "groupId": "eau-rouge-approach",
+            "knotIndex": 1,
+            "s": 1816.2888609858085,
+            "kappa": 0.0001149733409795663,
+            "pose": {
+              "x": 1151.5178326440596,
+              "y": 539.3807469807471,
+              "heading": 1.8641110551592344
+            }
+          },
+          {
+            "groupId": "eau-rouge-approach",
+            "knotIndex": 2,
+            "s": 2277.165142178134,
+            "kappa": 0,
+            "pose": {
+              "x": 1009.9464090915346,
+              "y": 977.9583953540945,
+              "heading": 1.890605298072694
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": 3.0360166006712794,
+            "realizedAngleDegrees": 3.03601660067128,
+            "targetCharacteristicRadiusMetres": 17395.336892536252,
+            "realizedCharacteristicRadiusMetres": 17395.33689253625,
+            "realizedMinimumRadiusMetres": 8697.848225084539
+          }
+        ]
+      },
+      {
+        "groupId": "raidillon-crest",
+        "groupIndex": 3,
+        "kind": "corner",
+        "motif": "long-sweeper",
+        "pointStart": 193,
+        "pointEnd": 227,
+        "sStart": 2277.165142178134,
+        "sEnd": 2654.4505701834046,
+        "targetLengthMetres": 377.28542800527066,
+        "realizedLengthMetres": 377.28542800527066,
+        "entryPose": {
+          "x": 1009.9464090915346,
+          "y": 977.9583953540945,
+          "heading": 1.890605298072694
+        },
+        "exitPose": {
+          "x": 737.0285616421918,
+          "y": 1186.9763674040325,
+          "heading": 3.0854259269847386
+        },
+        "knots": [
+          {
+            "groupId": "raidillon-crest",
+            "knotIndex": 0,
+            "s": 2277.165142178134,
+            "kappa": 0,
+            "pose": {
+              "x": 1009.9464090915346,
+              "y": 977.9583953540945,
+              "heading": 1.890605298072694
+            }
+          },
+          {
+            "groupId": "raidillon-crest",
+            "knotIndex": 1,
+            "s": 2345.0765192190825,
+            "kappa": 0.0037449244329174044,
+            "pose": {
+              "x": 987.0828465952105,
+              "y": 1041.8765548359206,
+              "heading": 1.9843731240634772
+            }
+          },
+          {
+            "groupId": "raidillon-crest",
+            "knotIndex": 2,
+            "s": 2465.8078561807692,
+            "kappa": 0.005201283934607507,
+            "pose": {
+              "x": 915.8249651793502,
+              "y": 1137.7480529095258,
+              "heading": 2.4880156125287156
+            }
+          },
+          {
+            "groupId": "raidillon-crest",
+            "knotIndex": 3,
+            "s": 2586.5391931424556,
+            "kappa": 0.0037449244329174044,
+            "pose": {
+              "x": 804.6963849395506,
+              "y": 1181.5597917547327,
+              "heading": 2.991658100993955
+            }
+          },
+          {
+            "groupId": "raidillon-crest",
+            "knotIndex": 4,
+            "s": 2654.4505701834046,
+            "kappa": 0,
+            "pose": {
+              "x": 737.0285616421918,
+              "y": 1186.9763674040325,
+              "heading": 3.0854259269847386
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 4,
+            "targetAngleDegrees": 68.45817931182683,
+            "realizedAngleDegrees": 68.45817931182685,
+            "targetCharacteristicRadiusMetres": 315.76742054479905,
+            "realizedCharacteristicRadiusMetres": 315.76742054479894,
+            "realizedMinimumRadiusMetres": 192.33100155186625
+          }
+        ]
+      },
+      {
+        "groupId": "les-combes",
+        "groupIndex": 4,
+        "kind": "complex",
+        "motif": "chicane",
+        "pointStart": 227,
+        "pointEnd": 256,
+        "sStart": 2654.4505701834046,
+        "sEnd": 2988.703578246356,
+        "targetLengthMetres": 334.25300806295127,
+        "realizedLengthMetres": 334.25300806295127,
+        "entryPose": {
+          "x": 737.0285616421918,
+          "y": 1186.9763674040325,
+          "heading": 3.0854259269847386
+        },
+        "exitPose": {
+          "x": 543.0645322487675,
+          "y": 1019.5539104977785,
+          "heading": 2.9882896661587215
+        },
+        "knots": [
+          {
+            "groupId": "les-combes",
+            "knotIndex": 0,
+            "s": 2654.4505701834046,
+            "kappa": 0,
+            "pose": {
+              "x": 737.0285616421918,
+              "y": 1186.9763674040325,
+              "heading": 3.0854259269847386
+            }
+          },
+          {
+            "groupId": "les-combes",
+            "knotIndex": 1,
+            "s": 2721.301171795995,
+            "kappa": 0.034322483861080645,
+            "pose": {
+              "x": 671.2506715894658,
+              "y": 1183.7555959236477,
+              "heading": 3.7270993057117896
+            }
+          },
+          {
+            "groupId": "les-combes",
+            "knotIndex": 2,
+            "s": 2814.892014053621,
+            "kappa": 0,
+            "pose": {
+              "x": 650.4269022653955,
+              "y": 1095.2709356554726,
+              "heading": 4.624812019477467
+            }
+          },
+          {
+            "groupId": "les-combes",
+            "knotIndex": 3,
+            "s": 2895.1127359887296,
+            "kappa": -0.0336877790438871,
+            "pose": {
+              "x": 634.0560674540935,
+              "y": 1018.4382939625311,
+              "heading": 3.8694015247476847
+            }
+          },
+          {
+            "groupId": "les-combes",
+            "knotIndex": 4,
+            "s": 2988.703578246356,
+            "kappa": 0,
+            "pose": {
+              "x": 543.0645322487675,
+              "y": 1019.5539104977785,
+              "heading": 2.9882896661587215
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": 88.20032614096999,
+            "realizedAngleDegrees": 88.20032614096998,
+            "targetCharacteristicRadiusMetres": 104.22430386545288,
+            "realizedCharacteristicRadiusMetres": 104.22430386545291,
+            "realizedMinimumRadiusMetres": 29.460729863970926
+          },
+          {
+            "firstKnot": 2,
+            "lastKnot": 4,
+            "targetAngleDegrees": -93.76582392398268,
+            "realizedAngleDegrees": -93.76582392398267,
+            "targetCharacteristicRadiusMetres": 106.20787662341151,
+            "realizedCharacteristicRadiusMetres": 106.20787662341152,
+            "realizedMinimumRadiusMetres": 30.015793679200176
+          }
+        ]
+      },
+      {
+        "groupId": "kemmel-bend",
+        "groupIndex": 5,
+        "kind": "nominal-straight",
+        "motif": "shallow-s",
+        "pointStart": 256,
+        "pointEnd": 340,
+        "sStart": 2988.703578246356,
+        "sEnd": 3968.7318689163935,
+        "targetLengthMetres": 985.6294511305168,
+        "realizedLengthMetres": 980.0282906700377,
+        "entryPose": {
+          "x": 543.0645322487675,
+          "y": 1019.5539104977785,
+          "heading": 2.9882896661587215
+        },
+        "exitPose": {
+          "x": -428.5117778239295,
+          "y": 1146.8858656538716,
+          "heading": 2.99026120021651
+        },
+        "knots": [
+          {
+            "groupId": "kemmel-bend",
+            "knotIndex": 0,
+            "s": 2988.703578246356,
+            "kappa": 0,
+            "pose": {
+              "x": 543.0645322487675,
+              "y": 1019.5539104977785,
+              "heading": 2.9882896661587215
+            }
+          },
+          {
+            "groupId": "kemmel-bend",
+            "knotIndex": 1,
+            "s": 3233.7106509138653,
+            "kappa": 0.0001836332641509666,
+            "pose": {
+              "x": 300.70107261667357,
+              "y": 1055.4083627974871,
+              "heading": 3.0107853904057245
+            }
+          },
+          {
+            "groupId": "kemmel-bend",
+            "knotIndex": 2,
+            "s": 3478.7177235813747,
+            "kappa": 0,
+            "pose": {
+              "x": 57.31094287881883,
+              "y": 1083.4589075526283,
+              "heading": 3.0332811146527274
+            }
+          },
+          {
+            "groupId": "kemmel-bend",
+            "knotIndex": 3,
+            "s": 3723.724796248884,
+            "kappa": -0.00017558641866064208,
+            "pose": {
+              "x": -186.0875826554795,
+              "y": 1111.440914658983,
+              "heading": 3.0117711574346187
+            }
+          },
+          {
+            "groupId": "kemmel-bend",
+            "knotIndex": 4,
+            "s": 3968.7318689163935,
+            "kappa": 0,
+            "pose": {
+              "x": -428.5117778239295,
+              "y": 1146.8858656538716,
+              "heading": 2.99026120021651
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": 2.5778201128868723,
+            "realizedAngleDegrees": 2.577820112886873,
+            "targetCharacteristicRadiusMetres": 10891.272936017634,
+            "realizedCharacteristicRadiusMetres": 10891.27293601763,
+            "realizedMinimumRadiusMetres": 5446.345582270036
+          },
+          {
+            "firstKnot": 2,
+            "lastKnot": 4,
+            "targetAngleDegrees": -2.464859532209079,
+            "realizedAngleDegrees": -2.46485953220908,
+            "targetCharacteristicRadiusMetres": 11390.402602068125,
+            "realizedCharacteristicRadiusMetres": 11390.402602068121,
+            "realizedMinimumRadiusMetres": 5695.942912870771
+          }
+        ]
+      },
+      {
+        "groupId": "bruxelles",
+        "groupIndex": 6,
+        "kind": "corner",
+        "motif": "late-apex",
+        "pointStart": 340,
+        "pointEnd": 357,
+        "sStart": 3968.7318689163935,
+        "sEnd": 4156.82208470741,
+        "targetLengthMetres": 188.09021579101682,
+        "realizedLengthMetres": 188.09021579101682,
+        "entryPose": {
+          "x": -428.5117778239295,
+          "y": 1146.8858656538716,
+          "heading": 2.99026120021651
+        },
+        "exitPose": {
+          "x": -551.8468229481982,
+          "y": 1253.086443623196,
+          "heading": 1.643406102611989
+        },
+        "knots": [
+          {
+            "groupId": "bruxelles",
+            "knotIndex": 0,
+            "s": 3968.7318689163935,
+            "kappa": 0,
+            "pose": {
+              "x": -428.5117778239295,
+              "y": 1146.8858656538716,
+              "heading": 2.99026120021651
+            }
+          },
+          {
+            "groupId": "bruxelles",
+            "knotIndex": 1,
+            "s": 4092.8714113384644,
+            "kappa": -0.016084649507272043,
+            "pose": {
+              "x": -539.8434740163719,
+              "y": 1190.8950171706504,
+              "heading": 2.101385355589364
+            }
+          },
+          {
+            "groupId": "bruxelles",
+            "knotIndex": 2,
+            "s": 4156.82208470741,
+            "kappa": 0,
+            "pose": {
+              "x": -551.8468229481982,
+              "y": 1253.086443623196,
+              "heading": 1.643406102611989
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": -77.16911270841956,
+            "realizedAngleDegrees": -77.16911270841958,
+            "targetCharacteristicRadiusMetres": 139.65141174098756,
+            "realizedCharacteristicRadiusMetres": 139.65141174098753,
+            "realizedMinimumRadiusMetres": 62.24742890018151
+          }
+        ]
+      },
+      {
+        "groupId": "no-name-kink",
+        "groupIndex": 7,
+        "kind": "corner",
+        "motif": "single-apex",
+        "pointStart": 357,
+        "pointEnd": 369,
+        "sStart": 4156.82208470741,
+        "sEnd": 4294.703164135308,
+        "targetLengthMetres": 137.88107942789793,
+        "realizedLengthMetres": 137.88107942789793,
+        "entryPose": {
+          "x": -551.8468229481982,
+          "y": 1253.086443623196,
+          "heading": 1.643406102611989
+        },
+        "exitPose": {
+          "x": -532.1910382529912,
+          "y": 1388.1640728126667,
+          "heading": 1.2091855206942113
+        },
+        "knots": [
+          {
+            "groupId": "no-name-kink",
+            "knotIndex": 0,
+            "s": 4156.82208470741,
+            "kappa": 0,
+            "pose": {
+              "x": -551.8468229481982,
+              "y": 1253.086443623196,
+              "heading": 1.643406102611989
+            }
+          },
+          {
+            "groupId": "no-name-kink",
+            "knotIndex": 1,
+            "s": 4225.762624421359,
+            "kappa": -0.00403066584696089,
+            "pose": {
+              "x": -550.5418177580367,
+              "y": 1321.8654638386063,
+              "heading": 1.4262958116531002
+            }
+          },
+          {
+            "groupId": "no-name-kink",
+            "knotIndex": 2,
+            "s": 4294.703164135308,
+            "kappa": 0,
+            "pose": {
+              "x": -532.1910382529912,
+              "y": 1388.1640728126667,
+              "heading": 1.2091855206942113
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": -24.879006721603318,
+            "realizedAngleDegrees": -24.87900672160332,
+            "targetCharacteristicRadiusMetres": 317.5369505032039,
+            "realizedCharacteristicRadiusMetres": 317.53695050320385,
+            "realizedMinimumRadiusMetres": 248.3511930547408
+          }
+        ]
+      },
+      {
+        "groupId": "campus-turnback",
+        "groupIndex": 8,
+        "kind": "corner",
+        "motif": "single-apex",
+        "pointStart": 369,
+        "pointEnd": 383,
+        "sStart": 4294.703164135308,
+        "sEnd": 4448.937672367056,
+        "targetLengthMetres": 154.2345082317479,
+        "realizedLengthMetres": 154.2345082317479,
+        "entryPose": {
+          "x": -532.1910382529912,
+          "y": 1388.1640728126667,
+          "heading": 1.2091855206942113
+        },
+        "exitPose": {
+          "x": -586.6227114242129,
+          "y": 1409.117729155933,
+          "heading": 4.33906331412766
+        },
+        "knots": [
+          {
+            "groupId": "campus-turnback",
+            "knotIndex": 0,
+            "s": 4294.703164135308,
+            "kappa": 0,
+            "pose": {
+              "x": -532.1910382529912,
+              "y": 1388.1640728126667,
+              "heading": 1.2091855206942113
+            }
+          },
+          {
+            "groupId": "campus-turnback",
+            "knotIndex": 1,
+            "s": 4371.820418251182,
+            "kappa": 0.04058596003341345,
+            "pose": {
+              "x": -537.1031193916289,
+              "y": 1456.579749798658,
+              "heading": 2.774124417410935
+            }
+          },
+          {
+            "groupId": "campus-turnback",
+            "knotIndex": 2,
+            "s": 4448.937672367056,
+            "kappa": 0,
+            "pose": {
+              "x": -586.6227114242129,
+              "y": 1409.117729155933,
+              "heading": 4.33906331412766
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": 179.32878795545548,
+            "realizedAngleDegrees": 179.32878795545548,
+            "targetCharacteristicRadiusMetres": 49.278124709960004,
+            "realizedCharacteristicRadiusMetres": 49.278124709960004,
+            "realizedMinimumRadiusMetres": 24.71977262586978
+          }
+        ]
+      },
+      {
+        "groupId": "paul-frere-bend",
+        "groupIndex": 9,
+        "kind": "nominal-straight",
+        "motif": "shallow-bow",
+        "pointStart": 383,
+        "pointEnd": 455,
+        "sStart": 4448.937672367056,
+        "sEnd": 5292.353905458606,
+        "targetLengthMetres": 844.1114077297971,
+        "realizedLengthMetres": 843.4162330915502,
+        "entryPose": {
+          "x": -586.6227114242129,
+          "y": 1409.117729155933,
+          "heading": 4.33906331412766
+        },
+        "exitPose": {
+          "x": -909.1940307712016,
+          "y": 629.9255241915574,
+          "heading": 4.300712317029545
+        },
+        "knots": [
+          {
+            "groupId": "paul-frere-bend",
+            "knotIndex": 0,
+            "s": 4448.937672367056,
+            "kappa": 0,
+            "pose": {
+              "x": -586.6227114242129,
+              "y": 1409.117729155933,
+              "heading": 4.33906331412766
+            }
+          },
+          {
+            "groupId": "paul-frere-bend",
+            "knotIndex": 1,
+            "s": 4870.6457889128305,
+            "kappa": -0.00009094204164777179,
+            "pose": {
+              "x": -742.5722921360115,
+              "y": 1017.3125876025647,
+              "heading": 4.3198878155786025
+            }
+          },
+          {
+            "groupId": "paul-frere-bend",
+            "knotIndex": 2,
+            "s": 5292.353905458606,
+            "kappa": 0,
+            "pose": {
+              "x": -909.1940307712016,
+              "y": 629.9255241915574,
+              "heading": 4.300712317029545
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": -2.1973502738401294,
+            "realizedAngleDegrees": -2.1973502738401303,
+            "targetCharacteristicRadiusMetres": 21992.028810461645,
+            "realizedCharacteristicRadiusMetres": 21992.028810461634,
+            "realizedMinimumRadiusMetres": 10996.30291276439
+          }
+        ]
+      },
+      {
+        "groupId": "blanchimont",
+        "groupIndex": 10,
+        "kind": "corner",
+        "motif": "long-sweeper",
+        "pointStart": 455,
+        "pointEnd": 527,
+        "sStart": 5292.353905458606,
+        "sEnd": 6124.746887386448,
+        "targetLengthMetres": 832.3929819278419,
+        "realizedLengthMetres": 832.3929819278419,
+        "entryPose": {
+          "x": -909.1940307712016,
+          "y": 629.9255241915574,
+          "heading": 4.300712317029545
+        },
+        "exitPose": {
+          "x": -546.2173175686559,
+          "y": 43.30117572852567,
+          "heading": 6.232257394774399
+        },
+        "knots": [
+          {
+            "groupId": "blanchimont",
+            "knotIndex": 0,
+            "s": 5292.353905458606,
+            "kappa": 0,
+            "pose": {
+              "x": -909.1940307712016,
+              "y": 629.9255241915574,
+              "heading": 4.300712317029545
+            }
+          },
+          {
+            "groupId": "blanchimont",
+            "knotIndex": 1,
+            "s": 5442.184642205618,
+            "kappa": 0.0018935124977674204,
+            "pose": {
+              "x": -952.123627601746,
+              "y": 486.9757557559965,
+              "heading": 4.587614926047005
+            }
+          },
+          {
+            "groupId": "blanchimont",
+            "knotIndex": 2,
+            "s": 5708.550396422527,
+            "kappa": 0.002629878469121417,
+            "pose": {
+              "x": -897.6948775980836,
+              "y": 231.43169068877003,
+              "heading": 5.266484855901971
+            }
+          },
+          {
+            "groupId": "blanchimont",
+            "knotIndex": 3,
+            "s": 5974.916150639437,
+            "kappa": 0.0018935124977674204,
+            "pose": {
+              "x": -693.3007271509578,
+              "y": 68.67945788982504,
+              "heading": 5.945354785756938
+            }
+          },
+          {
+            "groupId": "blanchimont",
+            "knotIndex": 4,
+            "s": 6124.746887386448,
+            "kappa": 0,
+            "pose": {
+              "x": -546.2173175686559,
+              "y": 43.30117572852567,
+              "heading": 6.232257394774399
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 4,
+            "targetAngleDegrees": 110.66938089404879,
+            "realizedAngleDegrees": 110.66938089404879,
+            "targetCharacteristicRadiusMetres": 430.9467024707952,
+            "realizedCharacteristicRadiusMetres": 430.9467024707952,
+            "realizedMinimumRadiusMetres": 380.2478248049715
+          }
+        ]
+      },
+      {
+        "groupId": "bus-stop-complex",
+        "groupIndex": 11,
+        "kind": "complex",
+        "motif": "sweeper-chain",
+        "pointStart": 527,
+        "pointEnd": 607,
+        "sStart": 6124.746887386448,
+        "sEnd": 7037.268066313721,
+        "targetLengthMetres": 912.5211789272726,
+        "realizedLengthMetres": 912.5211789272726,
+        "entryPose": {
+          "x": -546.2173175686559,
+          "y": 43.30117572852567,
+          "heading": 6.232257394774399
+        },
+        "exitPose": {
+          "x": 4.5184876285020437e-8,
+          "y": -5.933129144338376e-12,
+          "heading": 6.2831853071795765
+        },
+        "knots": [
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 0,
+            "s": 6124.746887386448,
+            "kappa": 0,
+            "pose": {
+              "x": -546.2173175686559,
+              "y": 43.30117572852567,
+              "heading": 6.232257394774399
+            }
+          },
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 1,
+            "s": 6270.750276014812,
+            "kappa": -0.017720806790335955,
+            "pose": {
+              "x": -404.16678124929683,
+              "y": 21.522658823425758,
+              "heading": 5.556742733143957
+            }
+          },
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 2,
+            "s": 6416.753664643175,
+            "kappa": 0,
+            "pose": {
+              "x": -365.82926210245734,
+              "y": -116.97949197174944,
+              "heading": 4.881228071513514
+            }
+          },
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 3,
+            "s": 6581.0074768500845,
+            "kappa": 0.16013411225650023,
+            "pose": {
+              "x": -311.6063960729777,
+              "y": -261.82895684536896,
+              "heading": 6.209979103185903
+            }
+          },
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 4,
+            "s": 6727.010865478448,
+            "kappa": 0,
+            "pose": {
+              "x": -229.1778174624834,
+              "y": -149.66385730722658,
+              "heading": 7.3911089053322865
+            }
+          },
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 5,
+            "s": 6891.264677685357,
+            "kappa": -0.025917295977663762,
+            "pose": {
+              "x": -144.18828915026558,
+              "y": -11.360646309798302,
+              "heading": 6.804565271776695
+            }
+          },
+          {
+            "groupId": "bus-stop-complex",
+            "knotIndex": 6,
+            "s": 7037.268066313721,
+            "kappa": 0,
+            "pose": {
+              "x": 4.5184876285020437e-8,
+              "y": -5.933129144338376e-12,
+              "heading": 6.2831853071795765
+            }
+          }
+        ],
+        "lobes": [
+          {
+            "firstKnot": 0,
+            "lastKnot": 2,
+            "targetAngleDegrees": -77.40827822126448,
+            "realizedAngleDegrees": -77.4082782212645,
+            "targetCharacteristicRadiusMetres": 216.13652067294208,
+            "realizedCharacteristicRadiusMetres": 216.13652067294208,
+            "realizedMinimumRadiusMetres": 56.6128787029567
+          },
+          {
+            "firstKnot": 2,
+            "lastKnot": 4,
+            "targetAngleDegrees": 143.80557885859162,
+            "realizedAngleDegrees": 143.80557885859164,
+            "targetCharacteristicRadiusMetres": 123.6143153311457,
+            "realizedCharacteristicRadiusMetres": 123.61431533114569,
+            "realizedMinimumRadiusMetres": 32.35774520640928
+          },
+          {
+            "firstKnot": 4,
+            "lastKnot": 6,
+            "targetAngleDegrees": -63.479346197098494,
+            "realizedAngleDegrees": -63.47934619709851,
+            "targetCharacteristicRadiusMetres": 280.0348339475558,
+            "realizedCharacteristicRadiusMetres": 280.03483394755574,
+            "realizedMinimumRadiusMetres": 73.3029648024196
+          }
+        ]
+      }
+    ],
+    "closure": {
+      "converged": true,
+      "iterations": 13,
+      "residualBefore": {
+        "xMetres": 38.861540123871094,
+        "yMetres": 59.14570608941051,
+        "positionMetres": 70.77028931419014,
+        "headingRadians": 0.07556870280163075
+      },
+      "residualAfter": {
+        "xMetres": 4.5184876285020437e-8,
+        "yMetres": -5.933129144338376e-12,
+        "positionMetres": 4.5184876674553664e-8,
+        "headingRadians": -9.769962616701378e-15
+      },
+      "variables": [
+        {
+          "groupId": "eau-rouge-approach",
+          "kind": "length",
+          "minimum": -280,
+          "maximum": 280,
+          "initial": 0,
+          "value": -2.3158994674973883,
+          "delta": -2.3158994674973883
+        },
+        {
+          "groupId": "eau-rouge-approach",
+          "kind": "shallow-bend-bias",
+          "minimum": -0.5,
+          "maximum": 0.5,
+          "initial": 0,
+          "value": -0.0025772237463637104,
+          "delta": -0.0025772237463637104
+        },
+        {
+          "groupId": "kemmel-bend",
+          "kind": "length",
+          "minimum": -300,
+          "maximum": 300,
+          "initial": 0,
+          "value": -5.601160460479207,
+          "delta": -5.601160460479207
+        },
+        {
+          "groupId": "kemmel-bend",
+          "kind": "shallow-bend-bias",
+          "minimum": -0.5,
+          "maximum": 0.5,
+          "initial": 0,
+          "value": -0.00016183366222927154,
+          "delta": -0.00016183366222927154
+        },
+        {
+          "groupId": "no-name-kink",
+          "kind": "lobe-angle",
+          "lobe": 0,
+          "minimum": -20,
+          "maximum": 20,
+          "initial": 0,
+          "value": -1.4983798461617965,
+          "delta": -1.4983798461617965
+        },
+        {
+          "groupId": "paul-frere-bend",
+          "kind": "length",
+          "minimum": -260,
+          "maximum": 260,
+          "initial": 0,
+          "value": -0.69517463824684,
+          "delta": -0.69517463824684
+        },
+        {
+          "groupId": "blanchimont",
+          "kind": "lobe-angle",
+          "lobe": 0,
+          "minimum": -24,
+          "maximum": 24,
+          "initial": 0,
+          "value": -2.8235248922121734,
+          "delta": -2.8235248922121734
+        }
+      ],
+      "largestRelativeGroupDistortion": 0.06408638460141805,
+      "history": [
+        {
+          "iteration": 1,
+          "residual": {
+            "xMetres": -1.0677522973175524,
+            "yMetres": 0.39886958275603396,
+            "positionMetres": 1.1398210001903297,
+            "headingRadians": 6.955325204671681e-12
+          },
+          "damping": 3.5e-7,
+          "acceptedStepScale": 1
+        },
+        {
+          "iteration": 2,
+          "residual": {
+            "xMetres": -0.022256274501742723,
+            "yMetres": -0.007562051598635084,
+            "positionMetres": 0.023505879670357856,
+            "headingRadians": 8.881784197001252e-15
+          },
+          "damping": 1.225e-7,
+          "acceptedStepScale": 1
+        },
+        {
+          "iteration": 3,
+          "residual": {
+            "xMetres": 0.002345107629722065,
+            "yMetres": -0.0025410677716594344,
+            "positionMetres": 0.003457825214661216,
+            "headingRadians": 7.993605777301127e-15
+          },
+          "damping": 4.287499999999999e-8,
+          "acceptedStepScale": 1
+        },
+        {
+          "iteration": 4,
+          "residual": {
+            "xMetres": -0.0005907895100136784,
+            "yMetres": -0.003284295701281137,
+            "positionMetres": 0.0033370092146405524,
+            "headingRadians": 2.6645352591003757e-15
+          },
+          "damping": 1.5006249999999996e-8,
+          "acceptedStepScale": 0.5
+        },
+        {
+          "iteration": 5,
+          "residual": {
+            "xMetres": -0.0019612217581936875,
+            "yMetres": 0.002522136562908227,
+            "positionMetres": 0.0031949277968008703,
+            "headingRadians": 9.769962616701378e-15
+          },
+          "damping": 5.252187499999998e-9,
+          "acceptedStepScale": 0.0625
+        },
+        {
+          "iteration": 6,
+          "residual": {
+            "xMetres": -0.0009843982527826256,
+            "yMetres": 0.00036201432615602446,
+            "positionMetres": 0.001048853799356081,
+            "headingRadians": -8.881784197001252e-16
+          },
+          "damping": 1.8382656249999993e-9,
+          "acceptedStepScale": 0.5
+        },
+        {
+          "iteration": 7,
+          "residual": {
+            "xMetres": -0.0009843982527826256,
+            "yMetres": 0.00036201432615602446,
+            "positionMetres": 0.001048853799356081,
+            "headingRadians": -8.881784197001252e-16
+          },
+          "damping": 1.8382656249999994e-8,
+          "acceptedStepScale": 0
+        },
+        {
+          "iteration": 8,
+          "residual": {
+            "xMetres": -0.0009843982527826256,
+            "yMetres": 0.00036201432615602446,
+            "positionMetres": 0.001048853799356081,
+            "headingRadians": -8.881784197001252e-16
+          },
+          "damping": 1.8382656249999994e-7,
+          "acceptedStepScale": 0
+        },
+        {
+          "iteration": 9,
+          "residual": {
+            "xMetres": -0.0009843982527826256,
+            "yMetres": 0.00036201432615602446,
+            "positionMetres": 0.001048853799356081,
+            "headingRadians": -8.881784197001252e-16
+          },
+          "damping": 0.0000018382656249999995,
+          "acceptedStepScale": 0
+        },
+        {
+          "iteration": 10,
+          "residual": {
+            "xMetres": -0.0009843982527826256,
+            "yMetres": 0.00036201432615602446,
+            "positionMetres": 0.001048853799356081,
+            "headingRadians": -8.881784197001252e-16
+          },
+          "damping": 0.000018382656249999995,
+          "acceptedStepScale": 0
+        },
+        {
+          "iteration": 11,
+          "residual": {
+            "xMetres": -0.0008252065897096372,
+            "yMetres": 0.00022041338932145255,
+            "positionMetres": 0.0008541358076397334,
+            "headingRadians": -9.769962616701378e-15
+          },
+          "damping": 0.000006433929687499998,
+          "acceptedStepScale": 0.25
+        },
+        {
+          "iteration": 12,
+          "residual": {
+            "xMetres": -0.0006156411734110634,
+            "yMetres": 0.00015664684813278246,
+            "positionMetres": 0.0006352576559388215,
+            "headingRadians": -9.769962616701378e-15
+          },
+          "damping": 3.5e-9,
+          "acceptedStepScale": 0.25
+        },
+        {
+          "iteration": 13,
+          "residual": {
+            "xMetres": 4.5184876285020437e-8,
+            "yMetres": -5.933129144338376e-12,
+            "positionMetres": 4.5184876674553664e-8,
+            "headingRadians": -9.769962616701378e-15
+          },
+          "damping": 1.2249999999999998e-9,
+          "acceptedStepScale": 1
+        }
+      ]
+    }
+  },
+  "tier0": {
+    "accepted": true,
+    "metrics": {
+      "lengthMetres": 7037.128095412013,
+      "averageSpeedKmh": 229.329811807,
+      "estimatedLapSeconds": 110.468241978,
+      "longestStraightSeconds": 14.582462756181894,
+      "longestStraightMetres": 1297.8391853001885,
+      "closureErrorMetres": 4.5185000398362286e-8,
+      "closureHeadingErrorRadians": 0,
+      "maximumCurvatureRate": 0.0015705072349774575,
+      "nonFiniteValueCount": 0,
+      "duplicateSegmentCount": 0,
+      "selfIntersectionCount": 0,
+      "selfIntersectionMarginMetres": 13.914591071287369,
+      "closestSeparationGroups": "paul-frere-bend:no-name-kink",
+      "gridPitFitMetres": 737.8391853001885,
+      "pitLossFraction": 0.15474767,
+      "cornerHistogram": {
+        "hairpin": 2,
+        "slow": 4,
+        "medium": 2,
+        "fast": 2,
+        "kink": 6,
+        "left": 11,
+        "right": 5
+      },
+      "linkedComplexes": 2,
+      "planFidelity": {
+        "maximumLengthDistortionFraction": 0.005682825786155862,
+        "maximumLobeAngleErrorDegrees": 2.842170943040401e-14,
+        "lobeSignMismatchCount": 0,
+        "apexCountMismatchCount": 0,
+        "radiusClassMismatchCount": 0,
+        "flexBoundViolationCount": 0,
+        "maximumBoundaryCurvatureJump": 0,
+        "eligibleShallowStraights": 3,
+        "measurableShallowStraights": 3,
+        "measurableShallowStraightFraction": 1
+      },
+      "topology": {
+        "convexHullFill": 0.8151793354473793,
+        "aspectRatio": 1.387700778665783,
+        "primaryAxisReversals": 4,
+        "secondaryAxisReversals": 6,
+        "headingCoverage": 0.9166666666666666,
+        "curvatureSignRuns": 10,
+        "returnSectionPairs": 1,
+        "compactness": 0.5899000712443687,
+        "structuralFingerprint": "fnv1a32:d7afd1bf"
+      }
+    },
+    "gates": [
+      {
+        "id": "trackgen.length_m",
+        "value": 7037.128095412013,
+        "unit": "m",
+        "minimum": 6000,
+        "maximum": 8000,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.speed_envelope_kmh",
+        "value": 229.329811807,
+        "unit": "km/h",
+        "minimum": 200,
+        "maximum": 230,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.lap_seconds",
+        "value": 110.468241978,
+        "unit": "s",
+        "minimum": 55,
+        "maximum": 150,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.longest_straight_seconds",
+        "value": 14.582462756181894,
+        "unit": "s",
+        "minimum": 8,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.corner_class_coverage",
+        "value": 5,
+        "unit": "classes represented",
+        "minimum": 5,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.corner_class_max_share",
+        "value": 0.375,
+        "unit": "fraction",
+        "maximum": 0.6,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.direction_balance",
+        "value": 5,
+        "unit": "corners",
+        "minimum": 1,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.linked_complexes",
+        "value": 2,
+        "unit": "complexes",
+        "minimum": 1,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.closure_error_m",
+        "value": 4.5185000398362286e-8,
+        "unit": "m",
+        "maximum": 1e-7,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.closure_heading_error_rad",
+        "value": 0,
+        "unit": "rad",
+        "maximum": 1e-7,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.closure_solved",
+        "value": 1,
+        "unit": "boolean",
+        "minimum": 1,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.non_finite_values",
+        "value": 0,
+        "unit": "values",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.duplicate_segments",
+        "value": 0,
+        "unit": "segments",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.curvature_rate",
+        "value": 0.0015705072349774575,
+        "unit": "1/m^2",
+        "maximum": 0.006,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.self_intersections",
+        "value": 0,
+        "unit": "occurrences",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.self_intersection_margin_m",
+        "value": 13.914591071287369,
+        "unit": "m",
+        "minimum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.lobe_angle_error_deg",
+        "value": 2.842170943040401e-14,
+        "unit": "degrees",
+        "maximum": 1e-7,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.lobe_sign_mismatches",
+        "value": 0,
+        "unit": "lobes",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.apex_count_mismatches",
+        "value": 0,
+        "unit": "groups",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.radius_class_mismatches",
+        "value": 0,
+        "unit": "groups",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.flex_bound_violations",
+        "value": 0,
+        "unit": "variables",
+        "maximum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.boundary_curvature_jump",
+        "value": 0,
+        "unit": "1/m",
+        "maximum": 1e-9,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.shallow_straight_fraction",
+        "value": 1,
+        "unit": "fraction",
+        "minimum": 0.5,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.grid_pit_fit_m",
+        "value": 737.8391853001885,
+        "unit": "m",
+        "minimum": 0,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.pit_loss_fraction",
+        "value": 0.15474767,
+        "unit": "fraction",
+        "minimum": 0.12,
+        "maximum": 0.3,
+        "status": "pass"
+      }
+    ]
+  },
+  "tier1": {
+    "accepted": true,
+    "metrics": {
+      "semanticCorners": 10,
+      "passSpots": 6,
+      "bestPassScore": 3696652.2783383885,
+      "linkedComplexes": 1,
+      "rhythmVariance": 0.8802520544442296,
+      "widthUtilization": 0.5849605133141841,
+      "draftLapSeconds": 110.91772260205546,
+      "draftAverageSpeedKmh": 228.40048054695436,
+      "draftMaximumHeadingStep": 0.08300143219333123
+    },
+    "gates": [
+      {
+        "id": "trackgen.pass_spots",
+        "value": 6,
+        "unit": "corners",
+        "minimum": 2,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.semantic_corners",
+        "value": 10,
+        "unit": "corners",
+        "minimum": 7,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.linked_semantic_complexes",
+        "value": 1,
+        "unit": "complexes",
+        "minimum": 1,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.rhythm_variance",
+        "value": 0.8802520544442296,
+        "unit": "coefficient",
+        "minimum": 0.18,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.width_utilization",
+        "value": 0.5849605133141841,
+        "unit": "fraction",
+        "minimum": 0.35,
+        "maximum": 1.2,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.draft_heading_step",
+        "value": 0.08300143219333123,
+        "unit": "rad",
+        "maximum": 0.18,
+        "status": "pass"
+      },
+      {
+        "id": "trackgen.draft_lap_seconds",
+        "value": 110.91772260205546,
+        "unit": "s",
+        "minimum": 55,
+        "maximum": 150,
+        "status": "pass"
+      }
+    ]
+  },
+  "deeperValidation": {
+    "headlessProbe": "passed",
+    "profileWorkflow": "passed",
+    "auditEffects": "amber",
+    "cameraMinimapReview": "passed",
+    "evidence": {
+      "profileSelection": "normal",
+      "profileSearchEvaluations": 584,
+      "profileVerifiedDryLapSeconds": 122.733333333,
+      "profileRobustnessScore": 1,
+      "profileMaximumTrackingErrorMetres": 0.725912639,
+      "headlessHardInvariantFailures": 0,
+      "headlessRacePasses": 31,
+      "headlessRaceAttackCompletions": 27,
+      "auditEffectsCases": 25,
+      "auditEffectsHardInvariantFailures": 0,
+      "auditEffectsFinding": "amber: no single showcase hosted every requested vocabulary outcome",
+      "studioImportValid": true,
+      "runtimeBenchmarkFinding": "blocked by concurrent racecraft non-forward tuck-path invariant"
+    }
+  }
+}

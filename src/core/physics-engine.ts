@@ -1,7 +1,11 @@
 import { clamp, lerp, normAng } from '../shared/math';
 import { PHYS, SURF } from './physics';
 import { hashNearest } from './track';
+import { surfaceExposureAtLateral } from './surface';
 import type { Car, CarInput, CarModifiers, SurfaceState, Track } from './model';
+
+/** Below this speed steering is blended toward the low-speed kinematic model. */
+export const LOW_SPEED_KINEMATIC_LIMIT_MPS = 5;
 
 export function makeCar(x: number, y: number, h: number): Car {
   return {
@@ -37,13 +41,8 @@ export function trackSense(track: Track, car: Car): SurfaceState {
   const lat = dx * track.nx[bi]! + dy * track.ny[bi]!;
   car.s = ((bi * track.step + along) % track.len + track.len) % track.len;
   car.offCourse = bd > 784;
-  const al = Math.abs(lat), hw = track.hw;
-  let zone: keyof typeof SURF;
-  if (al < hw - 1.0) zone = 'road';
-  else if (al < hw + 1.3) zone = 'curb';
-  else zone = 'grass';
-  const su = SURF[zone];
-  return { zone, mu: su.mu, drag: su.drag, lat };
+  const exposure = surfaceExposureAtLateral(track, bi, lat);
+  return { zone: exposure.zone, mu: exposure.mu, drag: exposure.drag, lat };
 }
 
 export function stepCar(
@@ -54,7 +53,8 @@ export function stepCar(
   mods?: CarModifiers
 ): void {
   const P = PHYS;
-  const mPw = mods ? mods.pw : 1, mMu = mods ? mods.mu : 1, mDr = mods ? mods.dr : 1;
+  const mPw = mods ? mods.pw : 1, mMu = mods ? mods.mu : 1,
+    mDr = mods ? mods.dr : 1, mDf = mods ? mods.df : 1;
   const spd = Math.hypot(c.vx, c.vy);
   // steering: speed sensitive + rate limited
   const dMax = P.steerMax / (1 + Math.abs(c.vx) / P.steerFade);
@@ -72,7 +72,7 @@ export function stepCar(
   }
 
   const muS = surf.mu;
-  const df = Math.min(P.kDf * c.vx * c.vx, P.dfMax);
+  const df = Math.min(P.kDf * c.vx * c.vx, P.dfMax) * mDf;
   const FzF = P.m * P.g * P.b / P.L + df * P.dfFront;
   const FzR = P.m * P.g * P.a / P.L + df * (1 - P.dfFront);
   const muF = P.mu * muS * mMu;
@@ -126,7 +126,7 @@ export function stepCar(
   if (!c.rev && inp.brake > 0.1 && drive <= 0 && prevVx * c.vx < 0) c.vx = 0;
 
   // low-speed kinematic blend + lateral bleed
-  const wLow = clamp(1 - spd / 5, 0, 1);
+  const wLow = clamp(1 - spd / LOW_SPEED_KINEMATIC_LIMIT_MPS, 0, 1);
   if (wLow > 0){
     const rKin = (c.vx / P.L) * Math.tan(c.steer);
     c.r = lerp(c.r, rKin, wLow * Math.min(1, dt * 10));

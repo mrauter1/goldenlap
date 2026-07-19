@@ -3,13 +3,13 @@
 // Usage: node tools/shots.js [outdir]
 const path = require('path');
 const fs = require('fs');
-const { chromium } = require('playwright');
+const { launchBrowser } = require('./lib/browser');
 const out = process.argv[2] || path.join(__dirname, 'shots');
 fs.mkdirSync(out, { recursive: true });
 const url = 'file://' + path.resolve(__dirname, '../index.html');
 
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await launchBrowser();
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));

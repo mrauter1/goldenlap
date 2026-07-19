@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /home/marcelo/.local/bin/codex -c 'model_reasoning_effort="xhigh"' "$@"
