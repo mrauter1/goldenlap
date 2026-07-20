@@ -15,6 +15,8 @@ import {
   obligationsFor,
   owes
 } from '../../../src/session/racecraft/relations';
+import { createRacecraftClaimStations } from
+  '../../../src/session/racecraft/claim';
 
 type ActiveEntry = Entry & { car: Car };
 
@@ -137,7 +139,7 @@ describe('stateless hazard publication', () => {
         lateralTrackingErrorThresholdMetres: PHYS.carWid / 10,
         longitudinalTrackingErrorThresholdMetres: PHYS.carWid / 10,
         trackingErrorMetres: 0,
-        stations: []
+        stations: createRacecraftClaimStations(0)
       }
     ]]);
 

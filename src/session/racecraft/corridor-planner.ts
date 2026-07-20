@@ -13,7 +13,6 @@ import type {
   RacecraftCandidateKind,
   RacecraftClaim,
   RacecraftClaimRevisionReason,
-  RacecraftClaimStation,
   RacecraftTrackingErrorScale,
   RacecraftPredictionSource,
   Session
@@ -29,6 +28,7 @@ import {
 } from '../strategy';
 import { RACECRAFT_DECISION_INTERVAL_SECONDS } from './cadence';
 import {
+  createRacecraftClaimStations,
   racecraftClaimsSharePublication,
   racecraftClaimStateAtTime
 } from './claim';
@@ -59,6 +59,9 @@ import {
 } from './evaluator';
 
 type ActiveEntry = Entry & { car: Car };
+const MAXIMUM_BODY_OVERLAP_DISTANCE_METRES = Math.sqrt(
+  PHYS.carLen * PHYS.carLen + PHYS.carWid * PHYS.carWid
+);
 
 function cyclicIndex(track: Track, index: number): number {
   return ((Math.round(index) % track.n) + track.n) % track.n;
@@ -76,7 +79,8 @@ function indexAtProgress(
 }
 
 function forwardTrackDistance(track: Track, from: number, to: number): number {
-  return ((to - from) % track.len + track.len) % track.len;
+  const distance = to - from;
+  return distance < 0 ? distance + track.len : distance;
 }
 
 function signedTrackDistance(track: Track, from: number, to: number): number {
@@ -140,7 +144,6 @@ export function updateRacecraftSideAgreements(
   // The projection of either oriented body onto the track tangent cannot
   // exceed its diagonal. Pairs beyond one body diagonal therefore cannot
   // have longitudinal body overlap and need no agreement work.
-  const maximumOverlapDistance = Math.hypot(PHYS.carLen, PHYS.carWid);
   for (let firstIndex = 0; firstIndex < sorted.length; firstIndex++) {
     const one = sorted[firstIndex]!;
     for (let step = 1; step < sorted.length; step++) {
@@ -150,7 +153,7 @@ export function updateRacecraftSideAgreements(
         one.car.s,
         two.car.s
       );
-      if (distance > maximumOverlapDistance) break;
+      if (distance > MAXIMUM_BODY_OVERLAP_DISTANCE_METRES) break;
       const key = racecraftPairKey(one.code, two.code);
       if (visited.has(key)) continue;
       visited.add(key);
@@ -543,7 +546,7 @@ function ballisticPredictionStations(
     const surface = trackSense(track, car);
     result.push({
       s: car.s,
-      speed: Math.hypot(car.vx, car.vy),
+      speed: Math.sqrt(car.vx * car.vx + car.vy * car.vy),
       centre: surface.lat ?? entry.latNow,
       headingOffsetRadians: measuredBodyHeadingOffset(track, car)
     });
@@ -596,7 +599,9 @@ function predictionState(
     session.trk.tx[index]!
   );
   const headingError = Math.abs(normAng(entry.car.h - roadHeading));
-  const speed = Math.hypot(entry.car.vx, entry.car.vy);
+  const speed = Math.sqrt(
+    entry.car.vx * entry.car.vx + entry.car.vy * entry.car.vy
+  );
   const worldVelocityX =
     entry.car.vx * Math.cos(entry.car.h) -
     entry.car.vy * Math.sin(entry.car.h);
@@ -719,7 +724,9 @@ function createClaim(code: string): RacecraftClaim {
     lateralTrackingErrorThresholdMetres: 0,
     longitudinalTrackingErrorThresholdMetres: 0,
     trackingErrorMetres: 0,
-    stations: []
+    stations: createRacecraftClaimStations(
+      MANEUVER_PREDICTION.samples
+    )
   };
 }
 
@@ -814,19 +821,21 @@ function retainAgedPredictionSupport(
       originLongitudinalError >
         longitudinalThreshold + Number.EPSILON)
     return;
-  const previousHorizon = previous.stations.at(-1)?.time ?? 0;
-  for (const station of claim.stations) {
-    if (age + station.time > previousHorizon + Number.EPSILON) continue;
+  const previousHorizon = previous.stations.length > 0
+    ? previous.stations.time[previous.stations.length - 1]!
+    : 0;
+  for (let index = 0; index < claim.stations.length; index++) {
+    const stationTime = claim.stations.time[index]!;
+    if (age + stationTime > previousHorizon + Number.EPSILON) continue;
     const retained = racecraftClaimStateAtTime(
       track,
       previous,
-      age + station.time
+      age + stationTime
     );
-    station.index = cyclicIndex(track, retained.s / track.step);
-    station.s = retained.s;
-    station.speed = retained.speed;
-    station.centre = retained.lateral;
-    station.headingOffsetRadians = retained.headingOffsetRadians;
+    claim.stations.s[index] = retained.s;
+    claim.stations.v[index] = retained.speed;
+    claim.stations.y[index] = retained.lateral;
+    claim.stations.heading[index] = retained.headingOffsetRadians;
   }
 }
 
@@ -838,7 +847,7 @@ function selectedDecisionFamily(entry: ActiveEntry): {
 } | null {
   const decision = entry.racecraftDecision;
   const selected = decision?.candidates.find(candidate =>
-    candidate.plan.key === decision.selectedPlanKey);
+    candidate.planNumericId === decision.selectedPlanNumericId);
   if (!decision || !selected || decision.selectedKind == null) return null;
   return {
     at: decision.at,
@@ -1083,22 +1092,11 @@ function prepareClaim(
         progress
       );
     }
-    const stationIndex = cyclicIndex(track, s / track.step);
-    const station: RacecraftClaimStation = claim.stations[sample] ?? {
-      index: 0,
-      time: 0,
-      s: 0,
-      speed: 0,
-      centre: 0,
-      headingOffsetRadians: 0
-    };
-    station.index = stationIndex;
-    station.time = time;
-    station.s = s;
-    station.speed = speed;
-    station.centre = centre;
-    station.headingOffsetRadians = headingOffsetRadians;
-    claim.stations[sample] = station;
+    claim.stations.time[sample] = time;
+    claim.stations.s[sample] = s;
+    claim.stations.v[sample] = speed;
+    claim.stations.y[sample] = centre;
+    claim.stations.heading[sample] = headingOffsetRadians;
     previousTime = time;
   }
   claim.stations.length = MANEUVER_PREDICTION.samples;

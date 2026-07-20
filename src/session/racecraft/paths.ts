@@ -97,7 +97,7 @@ export function setTargetAbsLat(
   entry: Entry,
   lateral: number,
   reason = 'lateral-intent'
-): void {
+): boolean {
   const track = session.trk;
   const agreement = sideAgreementBounds(session, entry);
   const envelope = sideAgreementEnvelopeAt(
@@ -105,10 +105,14 @@ export function setTargetAbsLat(
     currentIndex(track, entry),
     agreement
   );
+  // A car pinched between two live agreements can have no jointly legal
+  // normal-surface target until collision separation restores room. Recovery
+  // authority must yield to that safety veto instead of replacing the
+  // protected ordering with an arbitrary projection.
   if (envelope.viable === false)
-    throw new Error(`${entry.code} side agreement has no legal surface at current sample`);
+    return false;
   const target = clamp(lateral, envelope.minimum, envelope.maximum);
-  editLaneTarget(session, entry, target, reason);
+  return editLaneTarget(session, entry, target, reason);
 }
 
 function cyclicIndex(track: Track, index: number): number {

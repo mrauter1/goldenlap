@@ -1135,7 +1135,70 @@ the performance-critical path.
   budgets 6/0, and the J decomposition attributing candidate choices to
   V/B/proximity terms.
 
-### P-R — Resolution profiles (after P-BE and the reopened gates)
+### P-O — Lossless optimization (after P-BE, before the reopened gates)
+
+Optimizations that change **how** the answer is computed, never **which**
+answer — at every preset. The acceptance gate is behavioral, not
+bitwise: the standard probe scenes within measured noise and no new
+symptom class. (Checksum identity, where a structural change happens to
+preserve it, is sufficient evidence but is not required — float
+reordering and equivalent math are welcome.) Anything that cannot pass
+this gate is a resolution axis in disguise and belongs in the P-R
+profile, honestly labeled — coarser far-field checks, importance
+heuristics, and situational skipping are approximations wearing an
+optimization costume and are rejected here.
+
+Profile-directed: run the micro-attribution before and after each
+tranche; optimize what is measured, in descending order of measured
+cost. Sequenced after the incremental β re-check lands — the current
+benchmark is dominated by the known scheduler collapse and optimizing
+against it mismeasures everything.
+
+The catalog, roughly in expected-payoff order:
+
+- **Branch-and-bound on the argmin.** J's terms are non-negative and
+  accumulate: evaluate candidates in ascending order of their cheap
+  lower bound, keep the running best, abort any candidate whose partial
+  sum exceeds `best + β`; within a candidate, abort the hazard sum the
+  same way. The selection is provably unchanged.
+- **Share rival geometry across candidates.** A rival's swept segments
+  (positions, headings, circle centres per station) are snapshot data —
+  candidate-independent by construction. Compute once per epoch per
+  rival, invalidate by claim revision (the key already exists); the
+  sweep cost divides by the candidate count.
+- **Zero allocation in Tier-1 paths.** Replace spreads, `.map/.filter/
+  .find`, and per-call closures in the evaluator's hot paths with
+  pooled scratch structs, indexed loops, and hoisted samplers. Keep
+  object shapes **monomorphic**: the `...(cond ? {field} : {})` pattern
+  creates polymorphic hidden classes that deoptimize every consumer —
+  fields always present, null when unused.
+- **Structure-of-arrays for claim stations** (parallel Float64Arrays:
+  s, y, v, heading) — cache locality in sweep loops, no GC, and the
+  prerequisite for epoch parallelism.
+- **Numeric identity in hot paths**: intern plan/family/certificate
+  string keys to integer ids; strings survive as debug labels only.
+- **Fuse the traffic-tick passes** over the sorted-by-s list into as
+  few walks as the data dependencies allow.
+- **Cheap math**: `Math.hypot` → `sqrt(x·x+y·y)` in per-station code;
+  double-modulo track wrap → compare-and-subtract for small advances;
+  hoist loop invariants the JIT cannot prove.
+
+**Approved in principle — epoch parallelism.** The snapshot semantics
+make Tier-1 embarrassingly parallel: every deliberation in an epoch
+reads the same immutable snapshot and publishes afterward. With SoA
+state in a SharedArrayBuffer and a **fixed merge order**, worker fan-out
+preserves determinism. It is the last resort (real engineering:
+worker lifecycle, Bun/browser parity) and must not be started while
+cheaper items remain unmeasured — but no restructuring of the epoch
+model may foreclose it.
+
+Probe (once, after the final tranche): the standard probe scenes
+(within-noise gate above) plus one benchmark invocation with the
+micro-attribution recorded before/after. Expected order of magnitude:
+B&B + rival-sharing 3–5× on the evaluator, allocation/monomorphism/SoA
+2–3× broadly — multiplicative with the β re-check's Tier-0 restoration.
+
+### P-R — Resolution profiles (after P-O and the reopened gates)
 
 Corollary 6's resolution category, turned into the product's performance
 settings. A performance setting is a named point on the resolution
@@ -1251,7 +1314,8 @@ racecraft changes.
 | P-S — Interaction-density scaling | in progress (amended implementation green; recheck pending) |
 | P-D — Residue, observers, tally | reopened (final gates pending P-S recheck) |
 | P-CE — Certainty equivalence and contact dynamics | implemented (probe mixed/red; benchmark red and recorded) |
-| P-BE — Battle economics and emergent daylight | in progress (measured proximity source blocked; recorded) |
+| P-BE — Battle economics and emergent daylight | implemented (probe red; measured proximity blocker recorded) |
+| P-O — Lossless optimization | pending |
 | P-R — Resolution profiles | pending |
 
 ## Acceptance

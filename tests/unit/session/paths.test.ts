@@ -168,9 +168,9 @@ describe('phase-varying racecraft lane programs', () => {
     evaluateLaneProgram(race, leader);
     publishAllClaims(race);
     const claim = race.racecraftClaims!.get(leader.code)!;
-    for (const station of claim.stations) station.speed = 55;
-    const binding = claim.stations[0]!;
-    binding.speed = 0;
+    for (let index = 0; index < claim.stations.length; index++)
+      claim.stations.v[index] = 55;
+    claim.stations.v[0] = 0;
     leader.spd = 55;
     leader.car.spd = 55;
 
@@ -184,11 +184,11 @@ describe('phase-varying racecraft lane programs', () => {
 
     expect(candidate.slowPointOwnerCode).toBe(leader.code);
     expect(candidate.slowPoint).not.toBeNull();
-    expect(candidate.slowPoint!.speed).toBe(binding.speed);
+    expect(candidate.slowPoint!.speed).toBe(claim.stations.v[0]);
     expect(candidate.slowPoint!.distance).toBeGreaterThan(0);
     expect(candidate.slowPoint).toEqual({
       distance: candidate.slowPoint!.distance,
-      speed: binding.speed,
+      speed: claim.stations.v[0],
       ownerCode: leader.code,
       reason: 'traffic-follow:cost-candidate',
       stationS: (
@@ -221,6 +221,51 @@ describe('phase-varying racecraft lane programs', () => {
     expect(point.distance).toBeGreaterThanOrEqual(0);
     expect(point.distance).toBeLessThan(30 - PHYS.carLen);
     expect('allowance' in point).toBe(false);
+  });
+
+  test('vetoes recovery authority while two agreements leave no joint lane', () => {
+    const race = session();
+    const lower = entry('LOWER');
+    const middle = entry('MIDDLE');
+    const upper = entry('UPPER');
+    placeAtIndex(race, lower, 200, 24);
+    placeAtIndex(race, middle, 200, 24);
+    placeAtIndex(race, upper, 200, 24);
+    race.entries = [lower, middle, upper];
+    const certificate = {
+      contextKey: 'test:pinch',
+      originS: middle.car.s,
+      spanMetres: race.trk.step,
+      lowerFamilyKey: 'test:lower',
+      upperFamilyKey: 'test:upper'
+    };
+    race.sideAgreements = new Map([
+      ['LOWER:MIDDLE', {
+        side: -1,
+        separatorEta: -0.5,
+        centreClearance: PHYS.carWid + 0.15,
+        familyCertificate: certificate,
+        since: race.t
+      }],
+      ['MIDDLE:UPPER', {
+        side: -1,
+        separatorEta: 0.5,
+        centreClearance: PHYS.carWid + 0.15,
+        familyCertificate: certificate,
+        since: race.t
+      }]
+    ]);
+    const edits = middle.laneEdits;
+    const target = middle._laneTargetAbsolute;
+
+    expect(setTargetAbsLat(
+      race,
+      middle,
+      race.trk.idealPath.off[middle.car.progIdx]!,
+      'contact-recovery'
+    )).toBe(false);
+    expect(middle.laneEdits).toBe(edits);
+    expect(middle._laneTargetAbsolute).toBe(target);
   });
 
   test('gates the small dirty-air grip loss on actual cornering load', () => {
@@ -544,8 +589,9 @@ describe('phase-varying racecraft lane programs', () => {
     evaluateLaneProgram(race, right);
     publishAllClaims(race);
     const snapshot = race.racecraftClaims!;
-    const leftCentres = snapshot.get(left.code)!.stations.map(
-      station => station.centre
+    const leftStations = snapshot.get(left.code)!.stations;
+    const leftCentres = Array.from(
+      leftStations.y.subarray(0, leftStations.length)
     );
 
     const end = ahead(race, start, 90);
@@ -588,8 +634,9 @@ describe('phase-varying racecraft lane programs', () => {
     );
     expect(second.feasible).toBe(true);
     expect(race.racecraftClaims).toBe(snapshot);
-    expect(snapshot.get(left.code)!.stations.map(
-      station => station.centre
+    const standingLeftStations = snapshot.get(left.code)!.stations;
+    expect(Array.from(
+      standingLeftStations.y.subarray(0, standingLeftStations.length)
     )).toEqual(leftCentres);
 
     editLaneTarget(race, left, -1, 'new-selected-program');
@@ -597,8 +644,9 @@ describe('phase-varying racecraft lane programs', () => {
     race.t += 1 / 30;
     publishAllClaims(race);
     expect(race.racecraftClaims).not.toBe(snapshot);
-    expect(snapshot.get(left.code)!.stations.map(
-      station => station.centre
+    const immutableLeftStations = snapshot.get(left.code)!.stations;
+    expect(Array.from(
+      immutableLeftStations.y.subarray(0, immutableLeftStations.length)
     )).toEqual(leftCentres);
   });
 

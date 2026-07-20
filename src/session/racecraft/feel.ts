@@ -69,7 +69,7 @@ function attackPairKey(attacker: Entry, target: Entry): string {
 function cornerIdForDecision(session: Session, attacker: Entry): string {
   const decision = attacker.racecraftDecision;
   const selected = decision?.candidates.find(candidate =>
-    candidate.plan.key === decision.selectedPlanKey);
+    candidate.planNumericId === decision.selectedPlanNumericId);
   if (selected &&
       selected.plan.mode !== 'ideal' && selected.plan.mode !== 'pit')
     return selected.plan.cornerId ?? 'straight';
@@ -195,7 +195,7 @@ export function observeRacecraftDecisions(
   for (const attacker of entries) {
     const decision = attacker.racecraftDecision;
     const selected = decision?.candidates.find(candidate =>
-      candidate.plan.key === decision.selectedPlanKey);
+      candidate.planNumericId === decision.selectedPlanNumericId);
     if (!decision || !selected) continue;
     const brakeCandidate = decision.candidates.find(candidate =>
       candidate.kind === 'brake-behind');

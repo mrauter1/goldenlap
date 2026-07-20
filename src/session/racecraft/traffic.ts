@@ -234,7 +234,7 @@ function publishedEmergencyDecision(
     return null;
   const decision = entry.racecraftDecision;
   const selected = decision?.candidates.find(candidate =>
-    candidate.plan.key === decision.selectedPlanKey);
+    candidate.planNumericId === decision.selectedPlanNumericId);
   if (!decision || !selected ||
       selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
       selected.plan.surfaceAuthorization !== 'emergency' ||
@@ -300,37 +300,59 @@ function boundedInteractionNeighbors(
   const entry = entries[entryIndex]!;
   if (entries.length <= 1) return [];
   const found: ActiveEntry[] = [];
-  const seen = new Set<string>();
-  const add = (candidate: ActiveEntry): void => {
-    if (seen.has(candidate.code) ||
-        !racecraftIsInteractionNeighbor(session, entry, candidate)) return;
-    seen.add(candidate.code);
-    found.push(candidate);
-  };
   for (let step = 1; step < entries.length; step++) {
     const candidate = entries[(entryIndex + step) % entries.length]!;
-    const distance = (
-      candidate.car.s - entry.car.s + session.trk.len
-    ) % session.trk.len;
+    const distance = forwardTrackDistance(
+      session.trk.len,
+      entry.car.s,
+      candidate.car.s
+    );
     if (distance > OBSTACLE_NEIGHBOR_SCAN_METRES) break;
-    add(candidate);
+    appendInteractionNeighbor(session, entry, candidate, found);
   }
   for (let step = 1; step < entries.length; step++) {
     const candidate = entries[
       (entryIndex - step + entries.length) % entries.length
     ]!;
-    const distance = (
-      entry.car.s - candidate.car.s + session.trk.len
-    ) % session.trk.len;
+    const distance = forwardTrackDistance(
+      session.trk.len,
+      candidate.car.s,
+      entry.car.s
+    );
     if (distance > OBSTACLE_NEIGHBOR_SCAN_METRES) break;
-    add(candidate);
+    appendInteractionNeighbor(session, entry, candidate, found);
   }
-  return found.sort((left, right) => left.code.localeCompare(right.code));
+  return found.sort(compareEntryCode);
 }
 
 interface RacecraftInteractionEpoch {
   demandedCodes: Set<string>;
   neighborsByCode: Map<string, ActiveEntry[]>;
+}
+
+function forwardTrackDistance(
+  length: number,
+  from: number,
+  to: number
+): number {
+  const distance = to - from;
+  return distance < 0 ? distance + length : distance;
+}
+
+function compareEntryCode(left: ActiveEntry, right: ActiveEntry): number {
+  return left.code.localeCompare(right.code);
+}
+
+function appendInteractionNeighbor(
+  session: Session,
+  entry: ActiveEntry,
+  candidate: ActiveEntry,
+  found: ActiveEntry[]
+): void {
+  for (const existing of found)
+    if (existing === candidate) return;
+  if (racecraftIsInteractionNeighbor(session, entry, candidate))
+    found.push(candidate);
 }
 
 function addEpochNeighbor(
@@ -347,9 +369,9 @@ function buildRacecraftInteractionEpoch(
   activeByCode: ReadonlyMap<string, ActiveEntry>
 ): RacecraftInteractionEpoch {
   const demandedCodes = new Set<string>();
-  const neighborSets = new Map<string, Set<ActiveEntry>>(
-    entries.map(entry => [entry.code, new Set<ActiveEntry>()])
-  );
+  const neighborSets = new Map<string, Set<ActiveEntry>>();
+  for (const entry of entries)
+    neighborSets.set(entry.code, new Set<ActiveEntry>());
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
     const entry = entries[entryIndex]!;
     for (const neighbor of boundedInteractionNeighbors(
@@ -408,17 +430,17 @@ export function racecraftDemandedClaimCodes(
   session: Session,
   entries: readonly Entry[]
 ): Set<string> {
-  const active = entries
-    .filter((entry): entry is ActiveEntry =>
-      !!entry.car &&
+  const active: ActiveEntry[] = [];
+  for (const entry of entries)
+    if (entry.car &&
       (entry.state === 'run' ||
         entry.state === 'pitIn' ||
         entry.state === 'pitOut'))
-    .sort((left, right) =>
-      left.car.s - right.car.s || left.code.localeCompare(right.code));
-  const activeByCode = new Map(
-    active.map(entry => [entry.code, entry] as const)
-  );
+      active.push(entry as ActiveEntry);
+  active.sort((left, right) =>
+    left.car.s - right.car.s || left.code.localeCompare(right.code));
+  const activeByCode = new Map<string, ActiveEntry>();
+  for (const entry of active) activeByCode.set(entry.code, entry);
   return buildRacecraftInteractionEpoch(
     session,
     active,
@@ -480,7 +502,8 @@ function refreshDefenseEpisodes(
   active.clear();
   for (const attacker of entries) {
     const selected = attacker.racecraftDecision?.candidates.find(candidate =>
-      candidate.plan.key === attacker.racecraftDecision?.selectedPlanKey);
+      candidate.planNumericId ===
+        attacker.racecraftDecision?.selectedPlanNumericId);
     if (!selected || selected.kind === 'hold' ||
         selected.kind === 'brake-behind' ||
         selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
@@ -506,6 +529,7 @@ export function updateTraffic(S: Session): void {
   const sbsPairs = S.sbsPairs ?? (S.sbsPairs = Object.create(null) as Record<string, SideBySidePair>);
   const sbsEpisodes = S.sbsEpisodes ?? (S.sbsEpisodes = [] as SideBySideEpisode[]);
   const roomPairs = S.roomPairs ?? (S.roomPairs = Object.create(null) as Record<string, LegacyRoomPair>);
+  const activeByCode = new Map<string, ActiveEntry>();
   S._sbsStamp = (S._sbsStamp || 0) + 1;
   const sbsStamp = S._sbsStamp;
   for (let entryIndex = 0; entryIndex < S.entries.length; entryIndex++){
@@ -515,7 +539,9 @@ export function updateTraffic(S: Session): void {
           e.state !== 'pitIn' &&
           e.state !== 'pitOut')) continue;
     list.push(e as ActiveEntry);
+    activeByCode.set(e.code, e as ActiveEntry);
     e.battle = false;
+    e._alongsideWith = '';
     if (queueProgramUpdateIsDue(S, e) &&
         (e.trafficSlowPoint?.reason.startsWith('traffic-comfort:') ||
           (S.mode !== 'race' &&
@@ -535,31 +561,23 @@ export function updateTraffic(S: Session): void {
     e.pressureT = Math.max(0, (e.pressureT || 0) - TRAF_DT);
     e.underPressure = e.pressureT > 5;
   }
-  const activeByCode = new Map(
-    list.map(entry => [entry.code, entry] as const)
-  );
   const n = list.length;
-  if (n <= 1)
-    for (const entry of list) entry._alongsideWith = '';
   if (n > 1){
     list.sort((a, b) => a.car.s - b.car.s);
-    for (const entry of list) entry._alongsideWith = '';
-    for (let index = 0; index < n; index++) {
-      const first = list[index]!;
-      const second = list[(index + 1) % n]!;
-      if (!alongside(tr, first, second)) continue;
-      first._alongsideWith = second.code;
-      second._alongsideWith = first.code;
-      if (n !== 2 || index === 0) recordAlongsideCanaries(S, first, second);
-    }
     for (let k = 0; k < n; k++){
       const e = list[k]!, a1 = list[(k + 1) % n]!;
       const a2 = n >= 3 ? list[(k + 2) % n]! : null;
+      const pairAlongside = alongside(tr, e, a1);
+      if (pairAlongside) {
+        e._alongsideWith = a1.code;
+        a1._alongsideWith = e.code;
+        if (n !== 2 || k === 0) recordAlongsideCanaries(S, e, a1);
+      }
       const sep1 = Math.abs(a1.latNow - e.latNow);
       const sbsKey = roomPairKey(e, a1);
       // This observer starts at geometric non-overlap. Sporting daylight is
       // enforced only by the live side-agreement partition.
-      if (alongside(tr, e, a1) &&
+      if (pairAlongside &&
           sep1 >= PHYS.carWid &&
           e.state === 'run' && a1.state === 'run'){
         let ep = sbsPairs[sbsKey];
@@ -601,7 +619,7 @@ export function updateTraffic(S: Session): void {
       const references = a2 ? 2 : 1;
       for (let referenceIndex = 0; referenceIndex < references; referenceIndex++) {
         const a = referenceIndex === 0 ? a1 : a2!;
-        const ds = (a.car.s - e.car.s + len) % len;
+        const ds = forwardTrackDistance(len, e.car.s, a.car.s);
         if (ds > 160) continue;
         const aLane = a.state === 'pitIn' || a.state === 'pitOut';
         if (aLane) continue;
@@ -633,7 +651,7 @@ export function updateTraffic(S: Session): void {
       // awareness deliberately stops at two-ahead; emergency hazards do not.
       for (let q = 3; q < n; q++){
         const a = list[(k + q) % n]!;
-        const ds = (a.car.s - e.car.s + len) % len;
+        const ds = forwardTrackDistance(len, e.car.s, a.car.s);
         if (ds > 160) break;
         const aLane = a.state === 'pitIn' || a.state === 'pitOut';
         const actualOccupancy = !aLane &&
@@ -728,7 +746,8 @@ export function updateTraffic(S: Session): void {
     const localEntries = [entry, ...neighbors];
     const obligation = obligationsFor(S, entry, localEntries)[0];
     const selected = entry.racecraftDecision?.candidates.find(candidate =>
-      candidate.plan.key === entry.racecraftDecision?.selectedPlanKey);
+      candidate.planNumericId ===
+        entry.racecraftDecision?.selectedPlanNumericId);
     const targetCode = selected?.slowPointOwnerCode ??
       (selected?.plan.mode !== 'ideal' && selected?.plan.mode !== 'pit'
         ? selected?.plan.leaderCode
@@ -867,7 +886,7 @@ export function updateTraffic(S: Session): void {
       continue;
     }
     const selected = decision?.candidates.find(candidate =>
-      candidate.plan.key === decision.selectedPlanKey);
+      candidate.planNumericId === decision.selectedPlanNumericId);
     const obligationParticipant = isObligationParticipant(
       S,
       entry,

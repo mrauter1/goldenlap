@@ -68,9 +68,17 @@ describe('traffic episode state', () => {
     defender._racecraftAppliedKind = 'corner-inside';
     defender._defSeenAttackers = { ATK: true };
     attacker.racecraftDecision = {
+      selectedPlanNumericId: 1,
       selectedPlanKey: 'attack',
       candidates: [{
-        plan: { mode: 'tuck', key: 'attack', anchors: [], leaderCode: 'DEF' }
+        planNumericId: 1,
+        plan: {
+          mode: 'side-inside',
+          key: 'attack',
+          anchors: [],
+          leaderCode: 'DEF',
+          surfaceAuthorization: 'normal'
+        }
       }]
     } as unknown as NonNullable<Entry['racecraftDecision']>;
     const session = {

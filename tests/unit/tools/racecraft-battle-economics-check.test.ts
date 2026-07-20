@@ -18,6 +18,8 @@ function candidate(
 ): RacecraftDecisionLogCandidate {
   return {
     kind,
+    planNumericId: 1,
+    familyNumericId: 1,
     planKey: `plan:${kind}`,
     stableFamilyId: `family:${kind}`,
     feasible: true,
@@ -55,6 +57,7 @@ function decision(
     laneProgramReason: 'test',
     laneProgramBinding: null,
     selectedKind,
+    selectedPlanNumericId: selectedPlanKey == null ? null : 1,
     selectedPlanKey,
     economics: [],
     candidates
@@ -99,6 +102,9 @@ function summary(
       attackCompletions: pack ? 3 : 0,
       attackPaceOutcomeSamples: pack ? 8 : 0,
       attackCompletionPaceDifferentialCorrelation: pack ? 0.4 : null,
+      agreementDaylightSamples: pack ? 12 : 0,
+      agreementDaylightMeanMetres: pack ? 0.3 : null,
+      agreementDaylightMinimumMetres: pack ? 0.2 : null,
       maximumCandidates: pack ? 6 : 1,
       pathsMaterialized: 0
     },
@@ -245,9 +251,13 @@ describe('P-BE phase probe observer', () => {
         status: 'observed',
         value: 2.5
       },
-      plannedDaylightMetres: {
+      agreementDaylightMetres: {
         status: 'observed',
-        value: 0.3
+        value: {
+          samples: 12,
+          mean: 0.3,
+          minimum: 0.2
+        }
       }
     });
     expect(output.attacks).toMatchObject({

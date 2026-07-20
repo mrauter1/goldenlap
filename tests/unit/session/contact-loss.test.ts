@@ -11,6 +11,7 @@ import {
   MEASURED_CONTACT_LOSS,
   MEASURED_CONTACT_LOSS_PROVENANCE,
   measuredContactEpisodeLossSeconds,
+  measuredContactEpisodeLossBound,
   measuredContactGrindLossSeconds,
   measuredContactLossSeconds,
   measuredContactRecoverySeconds
@@ -181,6 +182,28 @@ describe('measured physical contact loss', () => {
       measuredContactGrindLossSeconds(0.2),
       12
     );
+  });
+
+  test('exposes a measured-prefix lower bound without extrapolating', () => {
+    const maximum = MEASURED_CONTACT_GRIND_LOSS.at(-1)!.durationSeconds;
+    const covered = measuredContactEpisodeLossBound([{
+      initialRelativeNormalSpeed: 1,
+      durationSeconds: maximum
+    }]);
+    expect(covered.exact).toBe(true);
+    expect(covered.lowerBoundSeconds).toBe(
+      measuredContactEpisodeLossSeconds([{
+        initialRelativeNormalSpeed: 1,
+        durationSeconds: maximum
+      }])
+    );
+
+    const beyond = measuredContactEpisodeLossBound([{
+      initialRelativeNormalSpeed: 1,
+      durationSeconds: maximum + 1
+    }]);
+    expect(beyond.exact).toBe(false);
+    expect(beyond.lowerBoundSeconds).toBe(covered.lowerBoundSeconds);
   });
 
   test('records the non-stationary parallel-hold blocker without minting a rate curve', () => {

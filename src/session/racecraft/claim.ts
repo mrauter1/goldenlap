@@ -1,6 +1,43 @@
 import type { Track } from '../../core/model';
 import { clamp, normAng } from '../../shared/math';
-import type { RacecraftClaim } from '../model';
+import type { RacecraftClaim, RacecraftClaimStations } from '../model';
+
+export interface RacecraftClaimStationInput {
+  readonly time: number;
+  readonly s: number;
+  readonly centre: number;
+  readonly speed: number;
+  readonly headingOffsetRadians: number;
+}
+
+export function createRacecraftClaimStations(
+  capacity: number
+): RacecraftClaimStations {
+  return {
+    length: 0,
+    time: new Float64Array(capacity),
+    s: new Float64Array(capacity),
+    y: new Float64Array(capacity),
+    v: new Float64Array(capacity),
+    heading: new Float64Array(capacity)
+  };
+}
+
+export function racecraftClaimStationsFromRows(
+  rows: readonly RacecraftClaimStationInput[]
+): RacecraftClaimStations {
+  const stations = createRacecraftClaimStations(rows.length);
+  stations.length = rows.length;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index]!;
+    stations.time[index] = row.time;
+    stations.s[index] = row.s;
+    stations.y[index] = row.centre;
+    stations.v[index] = row.speed;
+    stations.heading[index] = row.headingOffsetRadians;
+  }
+  return stations;
+}
 
 export interface RacecraftEvaluationClaim {
   /** Immutable publication advanced to the evaluation epoch. */
@@ -16,7 +53,8 @@ function cyclicProgress(track: Track, progress: number): number {
 }
 
 function forwardTrackDistance(track: Track, from: number, to: number): number {
-  return ((to - from) % track.len + track.len) % track.len;
+  const distance = to - from;
+  return distance < 0 ? distance + track.len : distance;
 }
 
 function signedTrackDistance(track: Track, from: number, to: number): number {
@@ -32,11 +70,12 @@ export interface RacecraftClaimState {
   headingOffsetRadians: number;
 }
 
-/** Continuous state on the immutable published worldline. */
-export function racecraftClaimStateAtTime(
+/** Write continuous state on the immutable publication into caller scratch. */
+export function writeRacecraftClaimStateAtTime(
   track: Track,
   claim: RacecraftClaim,
-  time: number
+  time: number,
+  out: RacecraftClaimState
 ): RacecraftClaimState {
   const targetTime = Math.max(0, time);
   let fromTime = 0;
@@ -44,69 +83,110 @@ export function racecraftClaimStateAtTime(
   let fromLateral = claim.originCentre;
   let fromSpeed = claim.originSpeed;
   let fromHeading = claim.originHeadingOffsetRadians;
-  for (const station of claim.stations) {
-    if (targetTime > station.time) {
-      fromTime = station.time;
-      fromS = station.s;
-      fromLateral = station.centre;
-      fromSpeed = station.speed;
-      fromHeading = station.headingOffsetRadians;
+  const stations = claim.stations;
+  for (let index = 0; index < stations.length; index++) {
+    const stationTime = stations.time[index]!;
+    if (targetTime > stationTime) {
+      fromTime = stationTime;
+      fromS = stations.s[index]!;
+      fromLateral = stations.y[index]!;
+      fromSpeed = stations.v[index]!;
+      fromHeading = stations.heading[index]!;
       continue;
     }
     const u = clamp(
       (targetTime - fromTime) /
-        Math.max(Number.EPSILON, station.time - fromTime),
+        Math.max(Number.EPSILON, stationTime - fromTime),
       0,
       1
     );
     // A station interval is far shorter than half a lap, so the signed cyclic
     // displacement is unique. Treating every negative seam as forward motion
     // turns a sub-noise reanchor correction into an almost-full-lap jump.
-    const distance = signedTrackDistance(track, fromS, station.s);
-    return {
-      s: cyclicProgress(track, fromS + distance * u),
-      lateral: fromLateral +
-        (station.centre - fromLateral) * u,
-      speed: fromSpeed + (station.speed - fromSpeed) * u,
-      headingOffsetRadians: normAng(
-        fromHeading +
-        normAng(station.headingOffsetRadians - fromHeading) * u
-      )
-    };
+    const stationS = stations.s[index]!;
+    const stationLateral = stations.y[index]!;
+    const stationSpeed = stations.v[index]!;
+    const stationHeading = stations.heading[index]!;
+    const distance = signedTrackDistance(track, fromS, stationS);
+    out.s = cyclicProgress(track, fromS + distance * u);
+    out.lateral = fromLateral +
+      (stationLateral - fromLateral) * u;
+    out.speed = fromSpeed + (stationSpeed - fromSpeed) * u;
+    out.headingOffsetRadians = normAng(
+      fromHeading +
+      normAng(stationHeading - fromHeading) * u
+    );
+    return out;
   }
-  const last = claim.stations.at(-1);
-  if (last && targetTime > last.time) {
-    const previous = claim.stations.at(-2);
-    const previousTime = previous?.time ?? 0;
-    const previousLateral = previous?.centre ?? claim.originCentre;
-    const previousHeading = previous?.headingOffsetRadians ??
-      claim.originHeadingOffsetRadians;
-    const span = Math.max(Number.EPSILON, last.time - previousTime);
-    const lateralRate = (last.centre - previousLateral) / span;
+  const lastIndex = stations.length - 1;
+  if (lastIndex >= 0 && targetTime > stations.time[lastIndex]!) {
+    const previousIndex = lastIndex - 1;
+    const previousTime = previousIndex >= 0
+      ? stations.time[previousIndex]!
+      : 0;
+    const previousLateral = previousIndex >= 0
+      ? stations.y[previousIndex]!
+      : claim.originCentre;
+    const previousHeading = previousIndex >= 0
+      ? stations.heading[previousIndex]!
+      : claim.originHeadingOffsetRadians;
+    const lastTime = stations.time[lastIndex]!;
+    const lastLateral = stations.y[lastIndex]!;
+    const lastHeading = stations.heading[lastIndex]!;
+    const lastSpeed = stations.v[lastIndex]!;
+    const span = Math.max(Number.EPSILON, lastTime - previousTime);
+    const lateralRate = (lastLateral - previousLateral) / span;
     const headingRate = normAng(
-      last.headingOffsetRadians - previousHeading
+      lastHeading - previousHeading
     ) / span;
-    const elapsed = targetTime - last.time;
-    return {
-      s: cyclicProgress(
-        track,
-        last.s + Math.max(0, last.speed) * elapsed
-      ),
-      lateral: last.centre + lateralRate * elapsed,
-      speed: last.speed,
-      headingOffsetRadians: normAng(
-        last.headingOffsetRadians + headingRate * elapsed
-      )
-    };
+    const elapsed = targetTime - lastTime;
+    out.s = cyclicProgress(
+      track,
+      stations.s[lastIndex]! + Math.max(0, lastSpeed) * elapsed
+    );
+    out.lateral = lastLateral + lateralRate * elapsed;
+    out.speed = lastSpeed;
+    out.headingOffsetRadians = normAng(
+      lastHeading + headingRate * elapsed
+    );
+    return out;
   }
-  return {
-    s: last?.s ?? claim.originS,
-    lateral: last?.centre ?? claim.originCentre,
-    speed: last?.speed ?? claim.originSpeed,
-    headingOffsetRadians:
-      last?.headingOffsetRadians ?? claim.originHeadingOffsetRadians
-  };
+  out.s = lastIndex >= 0 ? stations.s[lastIndex]! : claim.originS;
+  out.lateral = lastIndex >= 0
+    ? stations.y[lastIndex]!
+    : claim.originCentre;
+  out.speed = lastIndex >= 0
+    ? stations.v[lastIndex]!
+    : claim.originSpeed;
+  out.headingOffsetRadians = lastIndex >= 0
+    ? stations.heading[lastIndex]!
+    : claim.originHeadingOffsetRadians;
+  return out;
 }
+
+/** Allocating convenience API for cold callers and diagnostics. */
+export function racecraftClaimStateAtTime(
+  track: Track,
+  claim: RacecraftClaim,
+  time: number
+): RacecraftClaimState {
+  return writeRacecraftClaimStateAtTime(track, claim, time, {
+    s: 0,
+    lateral: 0,
+    speed: 0,
+    headingOffsetRadians: 0
+  });
+}
+
+interface EvaluationEpochCache {
+  publishedAt: number;
+  publicationRevision: number;
+  predictionKey: string;
+  byTrack: WeakMap<Track, Map<number, RacecraftEvaluationClaim>>;
+}
+
+const evaluationEpochCache =
+  new WeakMap<RacecraftClaim, EvaluationEpochCache>();
 
 /**
  * Advance an immutable publication to one common evaluation epoch.
@@ -117,27 +197,50 @@ export function racecraftClaimAtEvaluationEpoch(
   claim: RacecraftClaim,
   evaluationAt: number
 ): RacecraftEvaluationClaim {
+  let cached = evaluationEpochCache.get(claim);
+  if (!cached ||
+      cached.publishedAt !== claim.publishedAt ||
+      cached.publicationRevision !== claim.publicationRevision ||
+      cached.predictionKey !== claim.predictionKey) {
+    cached = {
+      publishedAt: claim.publishedAt,
+      publicationRevision: claim.publicationRevision,
+      predictionKey: claim.predictionKey,
+      byTrack: new WeakMap()
+    };
+    evaluationEpochCache.set(claim, cached);
+  }
+  let byTime = cached.byTrack.get(track);
+  if (!byTime) {
+    byTime = new Map();
+    cached.byTrack.set(track, byTime);
+  }
+  const cachedView = byTime.get(evaluationAt);
+  if (cachedView) return cachedView;
   const age = Math.max(0, evaluationAt - claim.publishedAt);
-  if (age <= Number.EPSILON)
-    return { claim };
+  if (age <= Number.EPSILON) {
+    const view = { claim };
+    byTime.set(evaluationAt, view);
+    return view;
+  }
 
   const origin = racecraftClaimStateAtTime(track, claim, age);
-  const stations = claim.stations.map(station => {
+  const stations = createRacecraftClaimStations(claim.stations.length);
+  stations.length = claim.stations.length;
+  for (let index = 0; index < stations.length; index++) {
+    const stationTime = claim.stations.time[index]!;
     const state = racecraftClaimStateAtTime(
       track,
       claim,
-      age + station.time
+      age + stationTime
     );
-    return {
-      ...station,
-      index: cyclicIndex(track, state.s / track.step),
-      s: state.s,
-      speed: state.speed,
-      centre: state.lateral,
-      headingOffsetRadians: state.headingOffsetRadians
-    };
-  });
-  return {
+    stations.time[index] = stationTime;
+    stations.s[index] = state.s;
+    stations.v[index] = state.speed;
+    stations.y[index] = state.lateral;
+    stations.heading[index] = state.headingOffsetRadians;
+  }
+  const view = {
     claim: {
       ...claim,
       publishedAt: evaluationAt,
@@ -148,6 +251,8 @@ export function racecraftClaimAtEvaluationEpoch(
       stations
     }
   };
+  byTime.set(evaluationAt, view);
+  return view;
 }
 
 /**
@@ -171,7 +276,7 @@ export function racecraftClaimsSharePublication(
       previous.stations.length !== claim.stations.length)
     return false;
   for (let index = 0; index < claim.stations.length; index++)
-    if (previous.stations[index]!.time !== claim.stations[index]!.time)
+    if (previous.stations.time[index] !== claim.stations.time[index])
       return false;
 
   const age = claim.publishedAt - previous.publishedAt;
@@ -203,17 +308,20 @@ export function racecraftClaimsSharePublication(
     claim.originHeadingOffsetRadians,
     true
   )) return false;
-  const previousHorizon = previous.stations.at(-1)?.time ?? 0;
-  for (const station of claim.stations)
+  const previousHorizon = previous.stations.length > 0
+    ? previous.stations.time[previous.stations.length - 1]!
+    : 0;
+  for (let index = 0; index < claim.stations.length; index++)
     // Reanchoring appends a new tail interval. Only the overlapping support
     // can contain changed information relative to the predecessor.
-    if (age + station.time <= previousHorizon + Number.EPSILON &&
+    if (age + claim.stations.time[index]! <=
+          previousHorizon + Number.EPSILON &&
         !matchesAt(
-          station.time,
-          station.s,
-          station.centre,
-          station.speed,
-          station.headingOffsetRadians,
+          claim.stations.time[index]!,
+          claim.stations.s[index]!,
+          claim.stations.y[index]!,
+          claim.stations.v[index]!,
+          claim.stations.heading[index]!,
           true
         ))
       return false;

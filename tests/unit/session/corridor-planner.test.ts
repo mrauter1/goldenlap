@@ -163,6 +163,7 @@ function selectOffsetFamily(entry: Entry, eta = 2): PathPlan {
   entry.racecraftDecision = {
     at: 0,
     selectedKind: 'corner-outside',
+    selectedPlanNumericId: 1,
     selectedPlanKey: plan.key,
     candidateCount: 1,
     targetLateral: track.idealPath.off[hold]! + eta,
@@ -171,6 +172,8 @@ function selectOffsetFamily(entry: Entry, eta = 2): PathPlan {
     candidates: [{
       kind: 'corner-outside',
       plan,
+      planNumericId: 1,
+      familyNumericId: 1,
       feasible: true,
       vetoes: [],
       targetLateral: track.idealPath.off[hold]! + eta
@@ -498,13 +501,12 @@ describe('racecraft claim trust', () => {
     expect(claim.source).toBe('rederived');
     expect(claim.stations).toHaveLength(expected!.stations.length - 1);
     for (let index = 0; index < claim.stations.length; index++) {
-      const station = claim.stations[index]!;
       const optimal = expected!.stations[index + 1]!;
-      expect(station.time).toBeCloseTo(optimal.time, 12);
-      expect(station.s).toBeCloseTo(optimal.s, 12);
-      expect(station.speed).toBeCloseTo(optimal.speed, 12);
-      expect(station.centre).toBeCloseTo(optimal.lateral, 12);
-      expect(station.headingOffsetRadians)
+      expect(claim.stations.time[index]).toBeCloseTo(optimal.time, 12);
+      expect(claim.stations.s[index]).toBeCloseTo(optimal.s, 12);
+      expect(claim.stations.v[index]).toBeCloseTo(optimal.speed, 12);
+      expect(claim.stations.y[index]).toBeCloseTo(optimal.lateral, 12);
+      expect(claim.stations.heading[index])
         .toBeCloseTo(optimal.headingOffsetRadians, 12);
     }
 
@@ -547,17 +549,16 @@ describe('racecraft claim trust', () => {
     expect(spinClaim.source).toBe('ballistic');
     expect(spinClaim.originHeadingOffsetRadians)
       .toBeCloseTo(Math.PI / 2, 12);
-    const firstSpinStation = spinClaim.stations[0]!;
     const trajectoryHeading = Math.atan2(
-      firstSpinStation.centre - spinClaim.originCentre,
+      spinClaim.stations.y[0]! - spinClaim.originCentre,
       signedTrackDistance(
         built.tr,
         spinClaim.originS,
-        firstSpinStation.s
+        spinClaim.stations.s[0]!
       )
     );
     expect(Math.abs(normAng(
-      firstSpinStation.headingOffsetRadians - trajectoryHeading
+      spinClaim.stations.heading[0]! - trajectoryHeading
     ))).toBeGreaterThan(0.5);
     expect(spinning._racecraftRederivedProgram).toBeUndefined();
 
@@ -637,9 +638,14 @@ describe('racecraft claim trust', () => {
     publishAllClaims(session);
     const claim = session.racecraftClaims!.get(entry.code)!;
     expect(claim.source).toBe('ballistic');
-    expect(claim.stations.every(station =>
-      station.centre > built.tr.surface.normalMaximum[station.index]!))
-      .toBe(true);
+    for (let index = 0; index < claim.stations.length; index++) {
+      const trackIndex = (
+        Math.round(claim.stations.s[index]! / built.tr.step) %
+        built.tr.n + built.tr.n
+      ) % built.tr.n;
+      expect(claim.stations.y[index])
+        .toBeGreaterThan(built.tr.surface.normalMaximum[trackIndex]!);
+    }
   });
 
   test('acquires wraparound overlap without scanning unrelated pairs', () => {

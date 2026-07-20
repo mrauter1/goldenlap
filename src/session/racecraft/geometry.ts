@@ -286,7 +286,10 @@ function familySpeedLawIsFinite(
   const lateralSlope = idealSlope + evaluation.firstDerivative;
   const lateralSecond = idealSecond + evaluation.secondDerivative;
   const longitudinalScale = 1 - baseCurvature * totalOffset;
-  const q = Math.hypot(longitudinalScale, lateralSlope);
+  const q = Math.sqrt(
+    longitudinalScale * longitudinalScale +
+    lateralSlope * lateralSlope
+  );
   if (!Number.isFinite(q) || q <= Number.EPSILON) return false;
   const numerator = longitudinalScale * lateralSecond +
     baseCurvature * longitudinalScale * longitudinalScale +

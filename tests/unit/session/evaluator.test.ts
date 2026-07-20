@@ -18,6 +18,7 @@ import type {
   LineupEntry,
   PathPlan,
   RacecraftClaim,
+  RacecraftClaimStations,
   RacecraftDecision,
   RacecraftLongitudinalProgram,
   Session
@@ -41,7 +42,10 @@ import {
   sealRacecraftDecisionCertificate,
   snapshotContestedRegion
 } from '../../../src/session/racecraft/evaluator';
-import { racecraftClaimAtEvaluationEpoch } from
+import {
+  racecraftClaimAtEvaluationEpoch,
+  racecraftClaimStationsFromRows
+} from
   '../../../src/session/racecraft/claim';
 import { sampleCompactPathPlanOffset } from
   '../../../src/session/racecraft/compact-path';
@@ -178,16 +182,22 @@ function advanceEntryAlongClaim(
   elapsed: number
 ): void {
   const track = built.tr;
-  const station = claim.stations.find(value =>
-    value.time + Number.EPSILON >= elapsed) ?? claim.stations.at(-1)!;
-  const span = Math.max(Number.EPSILON, station.time);
+  let stationIndex = claim.stations.length - 1;
+  for (let index = 0; index < claim.stations.length; index++)
+    if (claim.stations.time[index]! + Number.EPSILON >= elapsed) {
+      stationIndex = index;
+      break;
+    }
+  const stationTime = claim.stations.time[stationIndex]!;
+  const span = Math.max(Number.EPSILON, stationTime);
   const u = Math.min(1, Math.max(0, elapsed / span));
   const distance = (
-    (station.s - claim.originS) % track.len + track.len
+    (claim.stations.s[stationIndex]! - claim.originS) %
+      track.len + track.len
   ) % track.len * u;
   const s = (claim.originS + distance) % track.len;
   const lateral = claim.originCentre +
-    (station.centre - claim.originCentre) * u;
+    (claim.stations.y[stationIndex]! - claim.originCentre) * u;
   const index = Math.round(s / track.step) % track.n;
   entry.car!.s = s;
   entry.car!.progIdx = index;
@@ -195,7 +205,7 @@ function advanceEntryAlongClaim(
   entry.car!.y = track.y[index]! + track.ny[index]! * lateral;
   entry.car!.h = Math.atan2(track.ty[index]!, track.tx[index]!);
   entry.car!.vx = entry.spd +
-    (station.speed - entry.spd) * u;
+    (claim.stations.v[stationIndex]! - entry.spd) * u;
   entry.car!.vy = 0;
   entry.prog += distance;
   entry.latNow = lateral;
@@ -217,6 +227,7 @@ function placeholderCertificate(
   claimRevisions: Record<string, number> = {}
 ): RacecraftDecision['certificate'] {
   return {
+    selectedFamilyNumericId: selectedFamilyId == null ? null : 1,
     selectedFamilyId,
     neighborCodes: [],
     claimRevisions,
@@ -254,15 +265,31 @@ function claim(
     lateralTrackingErrorThresholdMetres: PHYS.carWid / 10,
     longitudinalTrackingErrorThresholdMetres: PHYS.carWid / 10,
     trackingErrorMetres: 0,
-    stations: stationData.map(station => ({
-      index: Math.round(station.s / built.tr.step) % built.tr.n,
+    stations: racecraftClaimStationsFromRows(stationData.map(station => ({
       time: station.time,
       s: station.s,
       speed: 30,
       centre: station.centre,
       headingOffsetRadians: station.headingOffsetRadians ?? 0
-    }))
+    })))
   };
+}
+
+function cloneClaimStations(
+  stations: RacecraftClaimStations,
+  progressOffset = 0
+): RacecraftClaimStations {
+  const rows = [];
+  for (let index = 0; index < stations.length; index++)
+    rows.push({
+      time: stations.time[index]!,
+      s: (stations.s[index]! + progressOffset + built.tr.len) %
+        built.tr.len,
+      speed: stations.v[index]!,
+      centre: stations.y[index]!,
+      headingOffsetRadians: stations.heading[index]!
+    });
+  return racecraftClaimStationsFromRows(rows);
 }
 
 function straightIndex(): number {
@@ -409,7 +436,7 @@ describe('seconds-valued racecraft evaluator', () => {
       { time: 0.4, s: 112, centre: -1.25 },
       { time: 0.6, s: 118, centre: -0.4 }
     ]);
-    const originalStations = source.stations.map(station => ({ ...station }));
+    const originalStations = cloneClaimStations(source.stations);
 
     const evaluation = racecraftClaimAtEvaluationEpoch(
       built.tr,
@@ -421,9 +448,9 @@ describe('seconds-valued racecraft evaluator', () => {
     expect(evaluation.claim.publishedAt).toBeCloseTo(1.1, 12);
     expect(evaluation.claim.originS).toBeCloseTo(103, 12);
     expect(evaluation.claim.originCentre).toBeCloseTo(-1.25, 12);
-    expect(evaluation.claim.stations[0]!.time).toBe(0.2);
-    expect(evaluation.claim.stations[0]!.s).toBeCloseTo(109, 12);
-    expect(evaluation.claim.stations[1]!.s).toBeCloseTo(115, 12);
+    expect(evaluation.claim.stations.time[0]).toBe(0.2);
+    expect(evaluation.claim.stations.s[0]).toBeCloseTo(109, 12);
+    expect(evaluation.claim.stations.s[1]).toBeCloseTo(115, 12);
     expect(evaluation.claim.lateralTrackingErrorThresholdMetres)
       .toBe(source.lateralTrackingErrorThresholdMetres);
     expect(evaluation.claim.longitudinalTrackingErrorThresholdMetres)
@@ -624,11 +651,17 @@ describe('seconds-valued racecraft evaluator', () => {
       built.tr.idealPath.off[index]! -
       (2 * PHYS.colR2 -
         CAR_COLLISION_CONTACT_SLOP_METRES + PHYS.carWid / 20);
-    for (const station of rivalClaim.stations)
-      station.centre =
-        built.tr.idealPath.off[station.index]! -
+    for (let stationIndex = 0;
+      stationIndex < rivalClaim.stations.length;
+      stationIndex++) {
+      const trackIndex = Math.round(
+        rivalClaim.stations.s[stationIndex]! / built.tr.step
+      ) % built.tr.n;
+      rivalClaim.stations.y[stationIndex] =
+        built.tr.idealPath.off[trackIndex]! -
         (2 * PHYS.colR2 -
           CAR_COLLISION_CONTACT_SLOP_METRES + PHYS.carWid / 20);
+    }
 
     const initial = evaluateRacecraftDecision(
       session,
@@ -641,9 +674,11 @@ describe('seconds-valued racecraft evaluator', () => {
     ego.racecraftDecision = {
       ...initial,
       selectedKind: 'ideal',
+      selectedPlanNumericId: incumbent.planNumericId,
       selectedPlanKey: incumbent.plan.key,
       certificate: {
         ...initial.certificate,
+        selectedFamilyNumericId: incumbent.familyNumericId,
         selectedFamilyId: racecraftStableFamilyId(
           'ideal',
           incumbent.plan,
@@ -1006,6 +1041,7 @@ describe('seconds-valued racecraft evaluator', () => {
     const decision: RacecraftDecision = {
       at: 20,
       selectedKind: 'corner-outside',
+      selectedPlanNumericId: 1,
       selectedPlanKey: plan.key,
       candidateCount: 1,
       targetLateral: lateral,
@@ -1019,6 +1055,8 @@ describe('seconds-valued racecraft evaluator', () => {
       candidates: [{
         kind: 'corner-outside',
         plan,
+        planNumericId: 1,
+        familyNumericId: 1,
         feasible: true,
         vetoes: [],
         targetLateral: lateral,
@@ -1093,11 +1131,7 @@ describe('seconds-valued racecraft evaluator', () => {
     const revised: RacecraftClaim = {
       ...previous,
       publicationRevision: previous.publicationRevision + 1,
-      stations: previous.stations.map(station => ({
-        ...station,
-        index: (station.index + 1) % built.tr.n,
-        s: (station.s + built.tr.step) % built.tr.len
-      }))
+      stations: cloneClaimStations(previous.stations, built.tr.step)
     };
     session.racecraftClaims = new Map(session.racecraftClaims)
       .set(rival.code, revised);
@@ -1125,7 +1159,7 @@ describe('seconds-valued racecraft evaluator', () => {
       ...previous,
       predictionKey: `${previous.predictionKey}:changed-family`,
       publicationRevision: previous.publicationRevision + 1,
-      stations: previous.stations.map(station => ({ ...station }))
+      stations: cloneClaimStations(previous.stations)
     };
     session.racecraftClaims = new Map(session.racecraftClaims)
       .set(rival.code, changedFamily);
@@ -1142,7 +1176,7 @@ describe('seconds-valued racecraft evaluator', () => {
       ...previous,
       source: 'rederived',
       publicationRevision: previous.publicationRevision + 2,
-      stations: previous.stations.map(station => ({ ...station }))
+      stations: cloneClaimStations(previous.stations)
     };
     session.racecraftClaims = new Map(session.racecraftClaims)
       .set(rival.code, changedSource);
@@ -1360,9 +1394,11 @@ describe('seconds-valued racecraft evaluator', () => {
     entry.racecraftDecision = {
       ...evaluated,
       selectedKind: selected.kind,
+      selectedPlanNumericId: selected.planNumericId,
       selectedPlanKey: selectedPlan.key,
       certificate: {
         ...evaluated.certificate,
+        selectedFamilyNumericId: selected.familyNumericId,
         selectedFamilyId: racecraftStableFamilyId(
           selected.kind,
           selectedPlan,
@@ -1433,9 +1469,11 @@ describe('seconds-valued racecraft evaluator', () => {
       entry.racecraftDecision = {
         ...evaluated,
         selectedKind: selected.kind,
+        selectedPlanNumericId: selected.planNumericId,
         selectedPlanKey: selected.plan.key,
         certificate: {
           ...evaluated.certificate,
+          selectedFamilyNumericId: selected.familyNumericId,
           selectedFamilyId: racecraftStableFamilyId(
             selected.kind,
             selected.plan,
@@ -1716,6 +1754,7 @@ describe('seconds-valued racecraft evaluator', () => {
     entry.racecraftDecision = {
       at: session.t,
       selectedKind: null,
+      selectedPlanNumericId: null,
       selectedPlanKey: null,
       candidateCount: 1,
       targetLateral: entry.latNow,
@@ -1774,9 +1813,11 @@ describe('seconds-valued racecraft evaluator', () => {
       entry.racecraftDecision = {
         ...entry.racecraftDecision!,
         selectedKind: selected.kind,
+        selectedPlanNumericId: selected.planNumericId,
         selectedPlanKey: selected.plan.key,
         certificate: {
           ...entry.racecraftDecision!.certificate,
+          selectedFamilyNumericId: selected.familyNumericId,
           selectedFamilyId: racecraftStableFamilyId(
             selected.kind,
             selected.plan,
@@ -1858,6 +1899,7 @@ describe('seconds-valued racecraft evaluator', () => {
     entry.racecraftDecision = {
       at: 0,
       selectedKind: 'corner-inside',
+      selectedPlanNumericId: 1,
       selectedPlanKey: 'space:dead',
       candidateCount: 1,
       targetLateral: 2,
@@ -2037,6 +2079,7 @@ describe('seconds-valued racecraft evaluator', () => {
     follower.racecraftDecision = {
       ...pullOutDecision,
       selectedKind: pullOut.kind,
+      selectedPlanNumericId: pullOut.planNumericId,
       selectedPlanKey: pullOut.plan.key
     };
     const quietDefense = evaluateRacecraftDecision(
@@ -2124,51 +2167,45 @@ describe('seconds-valued racecraft evaluator', () => {
     )).toBe(true);
   });
 
-  test.skip(
-    'prices a contested rejoin beyond the sampled horizon ' +
-    '(derived 3 s catch does not intersect the authored rejoin)',
+  test(
+    'prices a contested rejoin beyond the sampled horizon',
     () => {
-    const index = straightIndex();
-    const followerSpeed = 40;
-    const leaderSpeed = 30;
-    const derivedContactTime = 3;
-    const gap = PHYS.carLen +
-      (followerSpeed - leaderSpeed) * derivedContactTime;
-    const leaderIndex = (
-      index + Math.round(gap / built.tr.step)
-    ) % built.tr.n;
-    const follower = activeEntry(
-      'TERMINAL-FOLLOW',
-      index,
-      built.tr.idealPath.off[index]!,
-      followerSpeed
-    );
-    const leader = activeEntry(
-      'TERMINAL-LEAD',
-      leaderIndex,
-      built.tr.idealPath.off[leaderIndex]!,
-      leaderSpeed
-    );
-    leader.car!.s = (follower.car!.s + gap) % built.tr.len;
-    leader.prog = follower.prog + gap;
-    const session = raceSession([follower, leader]);
-    evaluateLaneProgram(session, follower);
-    evaluateLaneProgram(session, leader);
-    publishAllClaims(session);
+      const index = straightIndex();
+      const gap = 12;
+      const leaderIndex = (
+        index + Math.round(gap / built.tr.step)
+      ) % built.tr.n;
+      const follower = activeEntry(
+        'TERMINAL-FOLLOW',
+        index,
+        built.tr.idealPath.off[index]!,
+        35
+      );
+      const leader = activeEntry(
+        'TERMINAL-LEAD',
+        leaderIndex,
+        built.tr.idealPath.off[leaderIndex]!,
+        15
+      );
+      leader.car!.s = (follower.car!.s + gap) % built.tr.len;
+      leader.prog = follower.prog + gap;
+      const session = raceSession([follower, leader]);
+      evaluateLaneProgram(session, follower);
+      evaluateLaneProgram(session, leader);
+      publishAllClaims(session);
 
-    const decision = evaluateRacecraftDecision(
-      session,
-      follower,
-      session.entries
-    )!;
+      const decision = evaluateRacecraftDecision(
+        session,
+        follower,
+        session.entries
+      )!;
 
-    expect(decision).not.toBeNull();
-    expect(decision.candidates.every(candidate =>
-      !candidate.feasible || Number.isFinite(candidate.cost)
-    )).toBe(true);
-    expect(session.racecraftOffHorizonContests ?? 0).toBeGreaterThan(0);
-    expect(session.racecraftOffHorizonMaximumContactTimeSeconds ?? 0)
-      .toBeGreaterThan(2.4);
+      expect(decision.candidates.every(candidate =>
+        !candidate.feasible || Number.isFinite(candidate.cost)
+      )).toBe(true);
+      expect(session.racecraftOffHorizonContests ?? 0).toBeGreaterThan(0);
+      expect(session.racecraftOffHorizonMaximumContactTimeSeconds ?? 0)
+        .toBeGreaterThan(2.4);
     }
   );
 

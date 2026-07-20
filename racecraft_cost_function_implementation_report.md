@@ -1185,8 +1185,11 @@ recheck; no threshold or implementation constant was changed in response.
 
 ## P-BE — Battle economics and emergent daylight
 
-Status: in progress. P-BE lands after P-CE and before the reopened P-S/P-D
-gates.
+Status: implemented; the single phase probe was consumed once and stopped red
+on a protected-corridor recovery invariant before emitting scene metrics. The
+fault is fixed and covered by a focused regression, but the probe was not
+retried. P-BE therefore hands its recorded red evidence to the reopened P-S
+and P-D gates rather than manufacturing a replacement sample.
 
 ### Reconciliation and measured-proximity blocker
 
@@ -1225,3 +1228,87 @@ gates.
   measured source, not by a silent fallback. This is the phase's explicit
   stop-and-record blocker; the later probe must report daylight acceptance red
   unless another physical source is supplied.
+
+### Incremental beta re-check
+
+- Point divergence still advances the affected claim's publication revision.
+  Before invalidating a live certificate, the consumer now rebuilds only the
+  changed rival context, re-evaluates the certified incumbent and its bounded
+  alternatives against the new point program, and applies the same
+  difference-valued beta used by full arbitration. If the winner cannot move
+  outside beta, the certificate absorbs the revision; otherwise normal
+  deliberation owns the change.
+- The re-check has explicit bounded counters:
+  `racecraftTier0BetaRechecks`, `racecraftTier0BetaAccepts`, and
+  `racecraftTier0BetaBreaks`. It neither changes publication identity nor
+  declares a statistical support boundary. This closes the P-CE blocker at
+  the only place that can answer the question: the decision consumer.
+
+### Battle economics and degrees of freedom
+
+- Pair pace evidence is an O(1), observation-time EWMA of actual time divided
+  by ideal time over identical progress. Its decay horizon is the observed
+  opportunity interval; before two opportunity onsets, the derived ideal lap
+  is the prior. Position value uses the dimensionally repaired
+  `w * max(0, deltaP) * T_reopp / T0` expression, with the declared
+  save/race/push weights `1/2`, `1`, and `2`.
+- Attack-family entry carries the committed, measured attempt-loss table plus
+  the signed incremental contest continuation. The proximity component is
+  exactly zero because the required measurement did not establish a source.
+  Candidate diagnostics and bounded session observers expose position value,
+  attempt loss, battle spend, pace differential, opportunity state, and the
+  selected objective decomposition.
+- Side and attack candidates may select capability braking effort. The
+  existing utilization-to-mistake law prices that effort, and the tucked
+  prefix retains its physical tow before pull-out. No new braking constant,
+  cooldown, attack timer, or behavioral branch was added.
+- Attack contests are anchored to their authored contested region even when
+  it lies past the sampling horizon. The evaluator advances both programs
+  through the bounded terminal continuation and prices the resulting contact,
+  grind, and response delta; geometry sampling remains bounded.
+- The terminal continuation exposed a stale authored-extension cache inherited
+  by conditioned response programs. That cache is now cleared when stations
+  are conditioned, so terminal sweeps extend the conditioned prefix instead
+  of splicing an unrelated trajectory. Exact contact sweeps use fixed world
+  body poses; the cheaper broad-phase screens remain track-relative.
+- Because a terminal contest can occupy the sampled horizon and the complete
+  rejoin horizon, the sustained-contact measurement domain is derived as
+  `2 * predictionHorizonSeconds = 4.8 s`. The measurement harness was invoked
+  once and the exact deterministic knots from `2.5` through `4.8 s` were
+  committed. No fit or extrapolation is used.
+
+### Protected-corridor recovery finding
+
+The phase probe reached a three-car pinch in which one car had simultaneous
+lower and upper side agreements with no jointly legal normal-surface target.
+`contact-recovery` attempted to author the ideal line and the old setter
+threw. Recovery authority now yields to the safety layer: both the public
+absolute-target setter and the lane editor return a veto when the live
+agreement intersection is non-viable. They do not project, relax sporting
+room, delete an agreement, or alter collision physics. A focused regression
+constructs the two-agreement pinch and verifies that no lane edit occurs.
+
+### P-BE probe
+
+Recorded on July 19, 2026. The one permitted invocation was
+`bun tools/racecraft-battle-economics-check.ts`. It exited `1` after
+`62.19 s` wall (`70.86 s` user, `13.92 s` system) before producing JSON.
+The exact blocker was
+`PRA side agreement has no legal surface at current sample`, raised by
+`setTargetAbsLat` while `recordHardImpact` processed a collision. Consequently
+no pack/leader deficit, touches, daylight, attacks, completions, lunges,
+budgets, checksums, or objective attribution were emitted. The invocation was
+not retried; those observations remain red/unknown for the later standard
+gates.
+
+### Verification and diff scope
+
+- Typecheck and module-boundary checks are green. Focused suites are green:
+  evaluator `39/39`, battle economics `7/7`, paths `12/12`, traffic `6/6`,
+  probe observer `4/4`, and contact loss `7/7`.
+- The changed runtime scope is the consumer-side beta re-check, battle
+  evidence and pricing, capability/terminal evaluation, exact contact sweep,
+  the extended measured grind table, and the safety-veto return path. Tooling
+  scope is the retained measurement harness and P-BE comparison observer;
+  stale tests were updated to the exact agreement-daylight and attack-family
+  contracts rather than shadowing retired names.

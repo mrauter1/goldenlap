@@ -143,6 +143,11 @@ describe('battle economics', () => {
       contestSeconds: 0,
       measuredProximitySeconds: 0
     })).toThrow();
+    expect(battleSpendSeconds({
+      measuredAttemptLossSeconds: 0.42,
+      contestSeconds: -0.12,
+      measuredProximitySeconds: 0
+    })).toBeCloseTo(0.3, 14);
   });
 
   test('rejects invalid pace and opportunity evidence', () => {

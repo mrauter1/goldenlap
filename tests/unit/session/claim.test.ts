@@ -4,6 +4,7 @@ import type { Track } from '../../../src/core/model';
 import type { RacecraftClaim } from '../../../src/session/model';
 import {
   racecraftClaimAtEvaluationEpoch,
+  racecraftClaimStationsFromRows,
   racecraftClaimsSharePublication,
   racecraftClaimStateAtTime
 } from '../../../src/session/racecraft/claim';
@@ -34,14 +35,13 @@ function claim(
     lateralTrackingErrorThresholdMetres: 0.2,
     longitudinalTrackingErrorThresholdMetres: 0.2,
     trackingErrorMetres: 0,
-    stations: [1, 2].map(time => ({
-      index: 0,
+    stations: racecraftClaimStationsFromRows([1, 2].map(time => ({
       time,
       s: (99 + 10 * time) % TRACK.len,
       speed: 10,
       centre,
       headingOffsetRadians: 0
-    })),
+    }))),
     ...overrides
   };
 }
@@ -51,20 +51,22 @@ function agedRepublish(
   age: number
 ): RacecraftClaim {
   const origin = racecraftClaimStateAtTime(TRACK, previous, age);
-  const stations = previous.stations.map(station => {
+  const rows = [];
+  for (let index = 0; index < previous.stations.length; index++) {
+    const stationTime = previous.stations.time[index]!;
     const state = racecraftClaimStateAtTime(
       TRACK,
       previous,
-      age + station.time
+      age + stationTime
     );
-    return {
-      ...station,
+    rows.push({
+      time: stationTime,
       s: state.s,
       speed: state.speed,
       centre: state.lateral,
       headingOffsetRadians: state.headingOffsetRadians
-    };
-  });
+    });
+  }
   return {
     ...previous,
     publishedAt: previous.publishedAt + age,
@@ -72,7 +74,7 @@ function agedRepublish(
     originCentre: origin.lateral,
     originSpeed: origin.speed,
     originHeadingOffsetRadians: origin.headingOffsetRadians,
-    stations
+    stations: racecraftClaimStationsFromRows(rows)
   };
 }
 
@@ -90,16 +92,16 @@ describe('exact point-publication identity', () => {
     const previous = claim({
       originS: 40,
       originSpeed: 2,
-      stations: [
+      stations: racecraftClaimStationsFromRows([
         {
-          index: 21, time: 1, s: 42, speed: 2, centre: 0,
+          time: 1, s: 42, speed: 2, centre: 0,
           headingOffsetRadians: 0
         },
         {
-          index: 21, time: 2, s: 41.9, speed: 2, centre: 0,
+          time: 2, s: 41.9, speed: 2, centre: 0,
           headingOffsetRadians: 0
         }
-      ]
+      ])
     });
 
     expect(racecraftClaimStateAtTime(TRACK, previous, 1.5).s)
@@ -108,12 +110,12 @@ describe('exact point-publication identity', () => {
     const acrossZero = claim({
       originS: 0.1,
       originSpeed: 0,
-      stations: [
+      stations: racecraftClaimStationsFromRows([
         {
-          index: 0, time: 1, s: 99.9, speed: 0, centre: 0,
+          time: 1, s: 99.9, speed: 0, centre: 0,
           headingOffsetRadians: 0
         }
-      ]
+      ])
     });
     expect(racecraftClaimStateAtTime(TRACK, acrossZero, 0.5).s)
       .toBeCloseTo(0, 12);
@@ -122,14 +124,13 @@ describe('exact point-publication identity', () => {
   test('interpolates body orientation across the angular seam', () => {
     const previous = claim({
       originHeadingOffsetRadians: Math.PI - 0.1,
-      stations: [{
-        index: 0,
+      stations: racecraftClaimStationsFromRows([{
         time: 1,
         s: 9,
         speed: 10,
         centre: 0,
         headingOffsetRadians: -Math.PI + 0.1
-      }]
+      }])
     });
 
     expect(Math.abs(
@@ -142,16 +143,16 @@ describe('exact point-publication identity', () => {
     let current = claim({
       originS: 40,
       originSpeed: 2,
-      stations: [
+      stations: racecraftClaimStationsFromRows([
         {
-          index: 21, time: 1, s: 42, speed: 2, centre: 0,
+          time: 1, s: 42, speed: 2, centre: 0,
           headingOffsetRadians: 0
         },
         {
-          index: 21, time: 2, s: 41.9, speed: 2, centre: 0,
+          time: 2, s: 41.9, speed: 2, centre: 0,
           headingOffsetRadians: 0
         }
-      ]
+      ])
     });
     for (let refresh = 1; refresh <= 40; refresh++) {
       current = racecraftClaimAtEvaluationEpoch(
@@ -159,8 +160,10 @@ describe('exact point-publication identity', () => {
         current,
         current.publishedAt + 1 / 30
       ).claim;
-      const points = [current.originS, ...current.stations.map(station =>
-        station.s)];
+      const points = [
+        current.originS,
+        ...current.stations.s.subarray(0, current.stations.length)
+      ];
       for (let index = 1; index < points.length; index++) {
         let distance = (
           points[index]! - points[index - 1]! + TRACK.len
@@ -177,13 +180,14 @@ describe('exact point-publication identity', () => {
     const previous = claim();
     const inside = agedRepublish(previous, 0.1);
     inside.originCentre += 0.19;
-    for (const station of inside.stations)
-      station.centre += 0.19;
+    for (let index = 0; index < inside.stations.length; index++)
+      inside.stations.y[index]! += 0.19;
     inside.originS = (inside.originS + 0.1) % TRACK.len;
     inside.originSpeed += 1;
-    for (const station of inside.stations) {
-      station.s = (station.s + 0.1) % TRACK.len;
-      station.speed += 1;
+    for (let index = 0; index < inside.stations.length; index++) {
+      inside.stations.s[index] =
+        (inside.stations.s[index]! + 0.1) % TRACK.len;
+      inside.stations.v[index]! += 1;
     }
     expect(racecraftClaimsSharePublication(TRACK, previous, inside))
       .toBe(false);
@@ -237,7 +241,7 @@ describe('exact point-publication identity', () => {
       .toBe(false);
 
     const grid = agedRepublish(previous, 0.1);
-    grid.stations[0]!.time += Number.EPSILON;
+    grid.stations.time[0]! += Number.EPSILON;
     expect(racecraftClaimsSharePublication(TRACK, previous, grid))
       .toBe(false);
   });

@@ -310,6 +310,7 @@ export function editLaneTarget(
   const surfaceMaximum = track.surface.normalMaximum[index]!;
   const agreement = sideAgreementBounds(session, entry);
   const currentEnvelope = sideAgreementEnvelopeAt(track, index, agreement);
+  if (currentEnvelope.viable === false) return false;
   const minimum = agreement ? currentEnvelope.minimum : surfaceMinimum;
   const maximum = agreement ? currentEnvelope.maximum : surfaceMaximum;
   let target = clamp(lateral, minimum, maximum);
@@ -336,6 +337,7 @@ export function editLaneTarget(
     targetIndex,
     agreement
   );
+  if (targetEnvelope.viable === false) return false;
   const authorizedTargetMinimum = agreement
     ? targetEnvelope.minimum
     : targetMinimum;
@@ -457,7 +459,10 @@ function writeLaneGeometrySample(
   const longitudinalScale = 1 - baseCurvature * totalOffset;
   const q = Math.max(
     Number.EPSILON,
-    Math.hypot(longitudinalScale, lateralSlope)
+    Math.sqrt(
+      longitudinalScale * longitudinalScale +
+      lateralSlope * lateralSlope
+    )
   );
   const numerator = longitudinalScale * lateralSecondDerivative +
     baseCurvature * longitudinalScale * longitudinalScale +

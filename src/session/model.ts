@@ -96,13 +96,13 @@ export interface PathPlanAnchor {
   index: number;
   offset: number;
   /** Native lane-program value; absent only for legacy absolute-offset edits. */
-  eta?: number;
+  eta?: number | null;
   /** Authored d(eta)/ds at this knot, when continuity survives reauthoring. */
-  etaFirstDerivative?: number;
+  etaFirstDerivative?: number | null;
   /** Authored d2(eta)/ds2 at this knot, when continuity survives reauthoring. */
-  etaSecondDerivative?: number;
+  etaSecondDerivative?: number | null;
   /** Exact unwrapped progress for native tow anchors; avoids index quantization. */
-  s?: number;
+  s?: number | null;
 }
 export type ManeuverTopology = 'hold' | 'left' | 'right' | 'brake';
 export type SurfaceAuthorization = 'normal' | 'emergency';
@@ -129,10 +129,10 @@ export type PathPlan =
       /** Offline grid member selected inside the same tactical slot. */
       lineTerminal?: CornerLineTerminal;
       /** Analytic member of the ideal-to-alternate corner-line family. */
-      lineBlend?: number;
+      lineBlend?: number | null;
       launchProgress?: number;
       brakeIndex?: number;
-      leaderCode?: string;
+      leaderCode?: string | null;
     };
 
 export type ManeuverConstraint =
@@ -148,11 +148,11 @@ export type ManeuverConstraint =
 export interface ManeuverCandidateDiagnostic {
   id: string;
   mode: PathMode;
-  topology?: ManeuverTopology;
-  surfaceAuthorization?: SurfaceAuthorization;
+  topology: ManeuverTopology | null;
+  surfaceAuthorization: SurfaceAuthorization | null;
   feasible: boolean;
   rejections: ManeuverConstraint[];
-  conflictingReservation?: string;
+  conflictingReservation: string | null;
   controllerDemand: number;
   roadExposure: number;
   curbExposure: number;
@@ -179,6 +179,9 @@ export interface RacecraftCandidateSeed {
 export interface RacecraftCandidateEvaluation {
   kind: RacecraftCandidateKind;
   plan: PathPlan;
+  /** Interned runtime identity; strings remain diagnostic labels only. */
+  planNumericId: number;
+  familyNumericId: number;
   feasible: boolean;
   vetoes: string[];
   targetLateral: number;
@@ -227,6 +230,8 @@ export type RacecraftClaimRevisionReason =
  * current progress, sampled indices, and the measured acquisition anchor.
  */
 export interface RacecraftDecisionCertificate {
+  selectedFamilyNumericId: number | null;
+  /** Diagnostic label for the interned identity above. */
   selectedFamilyId: string | null;
   neighborCodes: string[];
   claimRevisions: Record<string, number>;
@@ -247,6 +252,7 @@ export interface RacecraftDecisionEconomics {
 export interface RacecraftDecision {
   at: number;
   selectedKind: RacecraftCandidateKind | null;
+  selectedPlanNumericId: number | null;
   selectedPlanKey: string | null;
   candidateCount: number;
   targetLateral: number;
@@ -277,16 +283,22 @@ export interface RacecraftEvaluatorWorkDiagnostics {
   arrivalFamilyBuilds: number;
   arrivalFamilyCacheHits: number;
   tieBandHazardEvaluations: number;
+  rivalStateBuilds: number;
+  rivalStateCacheHits: number;
+  rivalSweepBuilds: number;
+  rivalSweepCacheHits: number;
+  rivalContinuationBuilds: number;
+  rivalContinuationCacheHits: number;
 }
 
-export interface RacecraftClaimStation {
-  index: number;
-  time: number;
-  s: number;
-  speed: number;
-  centre: number;
+export interface RacecraftClaimStations {
+  length: number;
+  time: Float64Array;
+  s: Float64Array;
+  y: Float64Array;
+  v: Float64Array;
   /** Predicted body orientation relative to the local track tangent. */
-  headingOffsetRadians: number;
+  heading: Float64Array;
 }
 
 export type RacecraftPredictionSource =
@@ -336,7 +348,7 @@ export interface RacecraftClaim {
   lateralTrackingErrorThresholdMetres: number;
   longitudinalTrackingErrorThresholdMetres: number;
   trackingErrorMetres: number;
-  stations: RacecraftClaimStation[];
+  stations: RacecraftClaimStations;
 }
 
 export interface RacecraftSideAgreement {
@@ -369,6 +381,8 @@ export type RacecraftInteractionCause =
 
 export interface RacecraftDecisionLogCandidate {
   kind: RacecraftCandidateKind;
+  planNumericId: number;
+  familyNumericId: number;
   planKey: string;
   stableFamilyId: string;
   feasible: boolean;
@@ -397,6 +411,7 @@ export interface RacecraftDecisionLogEntry {
   laneProgramReason: string;
   laneProgramBinding: string | null;
   selectedKind: RacecraftCandidateKind | null;
+  selectedPlanNumericId: number | null;
   selectedPlanKey: string | null;
   economics: RacecraftDecisionEconomics[];
   candidates: RacecraftDecisionLogCandidate[];

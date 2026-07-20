@@ -28,6 +28,7 @@ import { clamp, normAng } from '../../shared/math';
 import type {
   Entry,
   EntryTrafficSlowPoint,
+  ManeuverCandidateDiagnostic,
   PathPlan,
   PathPlanAnchor,
   RacecraftCandidateEvaluation,
@@ -54,8 +55,10 @@ import {
 } from '../strategy';
 import { RACECRAFT_DECISION_INTERVAL_SECONDS } from './cadence';
 import {
+  createRacecraftClaimStations,
   racecraftClaimAtEvaluationEpoch,
   racecraftClaimStateAtTime,
+  writeRacecraftClaimStateAtTime,
   type RacecraftClaimState,
   type RacecraftEvaluationClaim
 } from './claim';
@@ -80,12 +83,14 @@ import {
   measuredAttackTransitionLossSeconds
 } from './attempt-loss';
 import {
+  measuredContactEpisodeLossBound,
   measuredContactEpisodeLossSeconds
 } from './contact-loss';
 import {
-  evaluateManeuverPlanCompact,
+  evaluateManeuverPlanCompactWithSampler,
   maneuverPredictionStationTime,
-  MANEUVER_PREDICTION
+  MANEUVER_PREDICTION,
+  type ManeuverPlanSampler
 } from './feasibility';
 import {
   racecraftFamilyStateAt as computeLaneStateAt,
@@ -163,7 +168,13 @@ function evaluatorWork(
       deterministicSweeps: 0,
       arrivalFamilyBuilds: 0,
       arrivalFamilyCacheHits: 0,
-      tieBandHazardEvaluations: 0
+      tieBandHazardEvaluations: 0,
+      rivalStateBuilds: 0,
+      rivalStateCacheHits: 0,
+      rivalSweepBuilds: 0,
+      rivalSweepCacheHits: 0,
+      rivalContinuationBuilds: 0,
+      rivalContinuationCacheHits: 0
     });
 }
 
@@ -202,9 +213,11 @@ interface CandidateProgram {
   emergencyHazards: Map<string, number>;
   perturbations: Map<string, {
     base: number;
+    billSeconds: number;
+    recourseSeconds: number;
     bindingStationIndex: number;
   }>;
-  bounds: Map<string, boolean>;
+  bounds: Map<string, RelativePointStation[] | null>;
   positionGains: Map<string, boolean>;
   authoredExtensions: Map<number, ProgramStation[]>;
   evaluationClaims: EvaluationClaimMap;
@@ -270,12 +283,18 @@ interface Hazard {
   region: RacecraftContestedRegion | null | undefined;
   /** Snapshot-derived and candidate-independent within this deliberation. */
   adaptResponsibility: number | null;
-  bestPlanContinuation?: {
+  /** Fixed world geometry for the immutable rival publication. */
+  rivalSweepGeometry: {
+    origin: WorldBodyPose;
+    stations: WorldBodyPose[];
+  } | null;
+  bestPlanContinuation: {
     plan: PathPlan;
     speedLaw: CandidateSpeedLaw;
     stations: ProgramStation[];
     evaluationClaims: EvaluationClaimMap;
   } | null;
+  bestPlanContinuationResolved: boolean;
 }
 
 interface SweptContact {
@@ -294,13 +313,36 @@ interface HazardCost {
   bindingStationIndex: number;
 }
 
+interface HazardClearance {
+  stationIndex: number;
+  clearanceMetres: number;
+}
+
+interface ScoreProgramsScratch {
+  hazards: Hazard[];
+  stations: Array<RelativePointStation[] | null>;
+  clearances: Array<HazardClearance | null>;
+}
+
+const scoreProgramsScratchBySession =
+  new WeakMap<Session, ScoreProgramsScratch>();
+
+interface HazardResponseOption {
+  q: number | null;
+  qLowerBound: number;
+  waitSlack: number;
+  emergency: boolean;
+  order: number;
+  unresolvedContacts: SweptContact[] | null;
+}
+
 interface RuntimePairEconomics {
   lastAt: number;
   egoProgress: number;
   rivalProgress: number;
   pace: NormalizedPairPaceEvidence;
   opportunity: OpportunityIntervalEvidence;
-  activeBattleFamilyId: string | null;
+  activeBattleFamilyNumericId: number | null;
 }
 
 type BattleEconomicsRole = 'attack' | 'defense';
@@ -313,7 +355,7 @@ interface BattleEconomicsContext {
   opportunityPresent: boolean;
   paceDifferentialSecondsPerLap: number;
   reopportunitySeconds: number;
-  battleFamilyIds: ReadonlySet<string>;
+  battleFamilyNumericIds: ReadonlySet<number>;
 }
 
 const battleEconomicsBySession =
@@ -324,6 +366,82 @@ const selectedBattleStatesByEntry =
   new WeakMap<Entry, Set<RuntimePairEconomics>>();
 const standingDecisionEvaluations =
   new WeakMap<RacecraftDecision, StandingDecisionEvaluation>();
+const planNumericIds = new WeakMap<PathPlan, number>();
+let nextPlanNumericId = 1;
+interface FamilyIdentityInterner {
+  nextId: number;
+  byLabel: Map<string, number>;
+}
+const familyIdentityBySession =
+  new WeakMap<Session, FamilyIdentityInterner>();
+
+interface CandidateTowRivalSnapshot {
+  code: string | null;
+  downstream: number;
+  lateral: number;
+}
+
+const candidateTowRivalSnapshots = new WeakMap<
+  EvaluationClaimMap,
+  WeakMap<ActiveEntry, Map<number, CandidateTowRivalSnapshot>>
+>();
+const candidateTowStateScratch: RacecraftClaimState = {
+  s: 0,
+  lateral: 0,
+  speed: 0,
+  headingOffsetRadians: 0
+};
+const programStationScratchA: ProgramStation = {
+  time: 0,
+  progress: 0,
+  s: 0,
+  lateral: 0,
+  speed: 0,
+  headingOffsetRadians: 0
+};
+const programStationScratchB: ProgramStation = {
+  time: 0,
+  progress: 0,
+  s: 0,
+  lateral: 0,
+  speed: 0,
+  headingOffsetRadians: 0
+};
+
+type BestPlanContinuation =
+  NonNullable<Hazard['bestPlanContinuation']>;
+
+interface CachedBestPlanContinuation {
+  session: Session;
+  other: ActiveEntry;
+  publishedAt: number;
+  publicationRevision: number;
+  predictionKey: string;
+  value: BestPlanContinuation | null;
+}
+
+const bestPlanContinuationByClaim =
+  new WeakMap<RacecraftClaim, CachedBestPlanContinuation>();
+interface CachedRivalSweepGeometry {
+  track: Track;
+  publishedAt: number;
+  publicationRevision: number;
+  predictionKey: string;
+  geometry: NonNullable<Hazard['rivalSweepGeometry']>;
+}
+const rivalSweepGeometryByClaim =
+  new WeakMap<RacecraftClaim, CachedRivalSweepGeometry>();
+
+function cloneBestPlanContinuation(
+  value: BestPlanContinuation
+): BestPlanContinuation {
+  return {
+    plan: value.plan,
+    speedLaw: value.speedLaw,
+    stations: value.stations.map(station => ({ ...station })),
+    evaluationClaims: value.evaluationClaims
+  };
+}
 
 function freezeActiveEntry(entry: ActiveEntry): ActiveEntry {
   return {
@@ -375,6 +493,9 @@ function freezeStandingSession(
       ])
     );
   else delete frozen.sideAgreements;
+  const familyInterner = familyIdentityBySession.get(session);
+  if (familyInterner)
+    familyIdentityBySession.set(frozen, familyInterner);
   delete frozen.racecraftEvaluatorWork;
   return frozen;
 }
@@ -408,17 +529,13 @@ function commitBattleEconomicsSelection(
   contexts: readonly BattleEconomicsContext[]
 ): void {
   for (const state of selectedBattleStatesByEntry.get(entry) ?? [])
-    state.activeBattleFamilyId = null;
+    state.activeBattleFamilyNumericId = null;
   const active = new Set<RuntimePairEconomics>();
   if (selected) {
-    const familyId = racecraftStableFamilyId(
-      selected.evaluation.kind,
-      selected.evaluation.plan,
-      selected.evaluation.slowPointOwnerCode
-    );
+    const familyNumericId = selected.evaluation.familyNumericId;
     for (const context of contexts) {
       if (!battleProgram(selected, context)) continue;
-      context.state.activeBattleFamilyId = familyId;
+      context.state.activeBattleFamilyNumericId = familyNumericId;
       active.add(context.state);
     }
   }
@@ -526,6 +643,50 @@ function indexAtProgress(
   );
 }
 
+interface EvaluatorManeuverSamplerContext {
+  session: Session;
+  entry: ActiveEntry;
+  plan: PathPlan;
+  states: Map<number, LaneState>;
+  diagnostic: ManeuverCandidateDiagnostic | undefined;
+}
+
+const evaluatorManeuverSamplerContexts =
+  new WeakMap<ActiveEntry, EvaluatorManeuverSamplerContext>();
+
+function evaluatorManeuverStateAt(
+  context: EvaluatorManeuverSamplerContext,
+  index: number
+): LaneState {
+  const wrapped = cyclicIndex(context.session.trk, index);
+  const cached = context.states.get(wrapped);
+  if (cached) return cached;
+  const start = cyclicIndex(
+    context.session.trk,
+    context.entry.car.progIdx
+  );
+  const progress = context.entry.prog +
+    distanceAhead(context.session.trk, start, wrapped);
+  const state = laneStateAt(
+    context.session,
+    context.entry,
+    progress,
+    context.plan
+  );
+  context.states.set(wrapped, state);
+  return state;
+}
+
+const EVALUATOR_MANEUVER_SAMPLER:
+  ManeuverPlanSampler<EvaluatorManeuverSamplerContext> = {
+    lateralAt(context, index) {
+      return evaluatorManeuverStateAt(context, index).lateral;
+    },
+    curvatureAt(context, index) {
+      return evaluatorManeuverStateAt(context, index).curvature;
+    }
+  };
+
 function distanceAhead(track: Track, from: number, to: number): number {
   return ((cyclicIndex(track, to) - cyclicIndex(track, from) + track.n) %
     track.n) * track.step;
@@ -595,7 +756,8 @@ function activeDefensiveAttacker(
         (nearest && distance >= nearest.distance))
       continue;
     const selected = candidate.racecraftDecision?.candidates.find(value =>
-      value.plan.key === candidate.racecraftDecision?.selectedPlanKey);
+      value.planNumericId ===
+        candidate.racecraftDecision?.selectedPlanNumericId);
     const targetsDefender = selected?.plan.mode !== 'ideal' &&
       selected?.plan.mode !== 'pit' &&
       (selected?.plan.mode === 'side-inside' ||
@@ -675,7 +837,7 @@ function pairEconomicsState(
         capabilityPaceRatio(session, rival)
       ),
       opportunity: createOpportunityIntervalEvidence(),
-      activeBattleFamilyId: null
+      activeBattleFamilyNumericId: null
     };
     states.set(key, state);
   }
@@ -714,11 +876,9 @@ function battleProgram(
   program: CandidateProgram,
   context: BattleEconomicsContext
 ): boolean {
-  return context.battleFamilyIds.has(racecraftStableFamilyId(
-    program.evaluation.kind,
-    program.evaluation.plan,
-    program.evaluation.slowPointOwnerCode
-  ));
+  return context.battleFamilyNumericIds.has(
+    program.evaluation.familyNumericId
+  );
 }
 
 function attackProgramGainsPosition(
@@ -870,12 +1030,8 @@ function updateBattleEconomicsContext(
     opportunityPresent,
     paceDifferentialSecondsPerLap: relevantDifferential,
     reopportunitySeconds: measuredReopportunity,
-    battleFamilyIds: new Set(battlePrograms.map(program =>
-      racecraftStableFamilyId(
-        program.evaluation.kind,
-        program.evaluation.plan,
-        program.evaluation.slowPointOwnerCode
-      )))
+    battleFamilyNumericIds: new Set(battlePrograms.map(program =>
+      program.evaluation.familyNumericId))
   };
 }
 
@@ -924,6 +1080,39 @@ export function racecraftStableFamilyId(
     plan.emergencyReason ?? '',
     slowPointOwnerCode ?? plan.leaderCode ?? ''
   ].join('|');
+}
+
+function racecraftPlanNumericId(plan: PathPlan): number {
+  let id = planNumericIds.get(plan);
+  if (id == null) {
+    id = nextPlanNumericId++;
+    planNumericIds.set(plan, id);
+  }
+  return id;
+}
+
+function racecraftFamilyNumericId(
+  session: Session,
+  kind: RacecraftCandidateKind,
+  plan: PathPlan,
+  slowPointOwnerCode: string | null
+): number {
+  let interner = familyIdentityBySession.get(session);
+  if (!interner) {
+    interner = { nextId: 1, byLabel: new Map() };
+    familyIdentityBySession.set(session, interner);
+  }
+  const label = racecraftStableFamilyId(
+    kind,
+    plan,
+    slowPointOwnerCode
+  );
+  let id = interner.byLabel.get(label);
+  if (id == null) {
+    id = interner.nextId++;
+    interner.byLabel.set(label, id);
+  }
+  return id;
 }
 
 function currentLaneAt(
@@ -1163,7 +1352,7 @@ function fullCornerPlan(
     lineKind: line.kind,
     lineTerminal: line.terminal,
     lineBlend: 1,
-    ...(leaderCode ? { leaderCode } : {})
+    leaderCode
   };
 }
 
@@ -1297,7 +1486,7 @@ function straightFullPlan(
     pinnedFirst: true,
     topology: side < 0 ? 'left' : 'right',
     surfaceAuthorization: 'normal',
-    ...(leaderCode ? { leaderCode } : {})
+    leaderCode
   };
 }
 
@@ -1318,17 +1507,22 @@ function emergencyEscapePlan(
   let hasConstraint = false;
   for (const hazard of hazards) {
     const claim = hazard.claim;
-    for (const station of claim.stations) {
+    for (let stationIndex = 0;
+      stationIndex < claim.stations.length;
+      stationIndex++) {
+      const stationTime = claim.stations.time[stationIndex]!;
+      const stationS = claim.stations.s[stationIndex]!;
       const egoS = (
-        entry.car.s + Math.max(0, entry.spd) * station.time
+        entry.car.s + Math.max(0, entry.spd) * stationTime
       ) % track.len;
-      if (Math.abs(signedTrackDistance(track, egoS, station.s)) >
+      if (Math.abs(signedTrackDistance(track, egoS, stationS)) >
           PHYS.carLen)
         continue;
       const index = cyclicIndex(track, egoS / track.step);
       const clearance = PHYS.carWid;
       const ideal = track.idealPath.off[index]!;
-      const eta = station.centre - ideal + side * clearance;
+      const eta = claim.stations.y[stationIndex]! -
+        ideal + side * clearance;
       targetEta = side < 0
         ? Math.min(targetEta, eta)
         : Math.max(targetEta, eta);
@@ -1396,7 +1590,7 @@ function emergencyEscapePlan(
     topology: side < 0 ? 'left' : 'right',
     surfaceAuthorization: 'emergency',
     emergencyReason: 'collision-avoidance',
-    ...(hazards[0] ? { leaderCode: hazards[0].other.code } : {})
+    leaderCode: hazards[0]?.other.code ?? null
   };
 }
 
@@ -1471,26 +1665,28 @@ function blendAnchoredPlan(
     ...plan,
     lineBlend: lambda,
     anchors: plan.anchors.map((anchor, index) => {
-      if (index === 0) return { ...anchor };
+      if (index === 0)
+        return {
+          ...anchor,
+          s: anchor.s ?? null,
+          eta: anchor.eta ?? null,
+          etaFirstDerivative: anchor.etaFirstDerivative ?? null,
+          etaSecondDerivative: anchor.etaSecondDerivative ?? null
+        };
       const wrapped = cyclicIndex(track, anchor.index);
       const ideal = idealPath.off[wrapped]!;
       const eta = anchor.eta ?? anchor.offset - ideal;
       return {
         ...anchor,
+        s: anchor.s ?? null,
         offset: ideal + lambda * eta,
         eta: lambda * eta,
-        ...(anchor.etaFirstDerivative == null
-          ? {}
-          : {
-              etaFirstDerivative:
-                lambda * anchor.etaFirstDerivative
-            }),
-        ...(anchor.etaSecondDerivative == null
-          ? {}
-          : {
-              etaSecondDerivative:
-                lambda * anchor.etaSecondDerivative
-            })
+        etaFirstDerivative: anchor.etaFirstDerivative == null
+          ? null
+          : lambda * anchor.etaFirstDerivative,
+        etaSecondDerivative: anchor.etaSecondDerivative == null
+          ? null
+          : lambda * anchor.etaSecondDerivative
       };
     })
   };
@@ -1605,16 +1801,20 @@ function clearanceLambda(
     const prediction = evaluationClaims.get(other.code);
     if (!prediction) continue;
     const claim = prediction.claim;
-    for (const station of claim.stations) {
+    for (let stationIndex = 0;
+      stationIndex < claim.stations.length;
+      stationIndex++) {
+      const stationTime = claim.stations.time[stationIndex]!;
+      const stationS = claim.stations.s[stationIndex]!;
       const egoS = (
-        entry.car.s + Math.max(0, entry.spd) * station.time
+        entry.car.s + Math.max(0, entry.spd) * stationTime
       ) % track.len;
-      if (Math.abs(signedTrackDistance(track, egoS, station.s)) >
+      if (Math.abs(signedTrackDistance(track, egoS, stationS)) >
           PHYS.carLen)
         continue;
       const index = cyclicIndex(track, egoS / track.step);
       const egoProgress = entry.prog +
-        Math.max(0, entry.spd) * station.time;
+        Math.max(0, entry.spd) * stationTime;
       const y0 = sampleCompactPathPlanOffset(
         track,
         idealPlan,
@@ -1629,8 +1829,9 @@ function clearanceLambda(
       );
       const slope = y1 - y0;
       const overlap = PHYS.carWid;
-      const lower = station.centre - overlap;
-      const upper = station.centre + overlap;
+      const stationLateral = claim.stations.y[stationIndex]!;
+      const lower = stationLateral - overlap;
+      const upper = stationLateral + overlap;
       if (Math.abs(slope) <= Number.EPSILON) {
         // This station belongs to the acquisition prefix shared by every λ.
         // It cannot inform the side-family seed; continuous collision pricing
@@ -1640,7 +1841,7 @@ function clearanceLambda(
       conflicts.push({
         ideal: y0,
         slope,
-        centre: station.centre,
+        centre: stationLateral,
         overlap
       });
       const first = (lower - y0) / slope;
@@ -1735,7 +1936,7 @@ function seededSideCandidate(
   const lambda = lambdaSeed.lambda;
   const plan: DynamicPlan = {
     ...blendAnchoredPlan(session.trk, full, lambda),
-    ...(full.lineKind ? { lineBlend: lambda } : {}),
+    lineBlend: lambda,
     // The exact decision variable lives in lineBlend. A generated key is
     // categorical identity, not a floating-point geometry fingerprint:
     // embedding λ here made equivalent Bun/browser plans differ at the last
@@ -1813,6 +2014,24 @@ function brakeBehindSeed(
   };
 }
 
+function appendDistinctCandidateSeed(
+  session: Session,
+  seeds: RacecraftCandidateSeed[],
+  familyNumericIds: number[],
+  seed: RacecraftCandidateSeed
+): void {
+  const identity = racecraftFamilyNumericId(
+    session,
+    seed.kind,
+    seed.plan,
+    seed.slowPointOwnerCode
+  );
+  for (let index = 0; index < familyNumericIds.length; index++)
+    if (familyNumericIds[index] === identity) return;
+  seeds.push(seed);
+  familyNumericIds.push(identity);
+}
+
 function buildCandidateSeeds(
   session: Session,
   entry: ActiveEntry,
@@ -1823,7 +2042,8 @@ function buildCandidateSeeds(
   evaluatorWork(session).candidateFamilyBuilds++;
   const leader = activeLeader(session, entry, entries);
   const previousSelected = entry.racecraftDecision?.candidates.find(candidate =>
-    candidate.plan.key === entry.racecraftDecision?.selectedPlanKey);
+    candidate.planNumericId ===
+      entry.racecraftDecision?.selectedPlanNumericId);
   const incumbentKind = entry._racecraftAppliedKind ??
     entry.racecraftDecision?.selectedKind ??
     'hold';
@@ -1835,23 +2055,14 @@ function buildCandidateSeeds(
       previousSelected?.slowPointOwnerCode ??
       null
   }];
-  const pushDistinctSeed = (seed: RacecraftCandidateSeed): void => {
-    const identity = racecraftStableFamilyId(
-      seed.kind,
-      seed.plan,
-      seed.slowPointOwnerCode
-    );
-    if (seeds.some(existing =>
-      racecraftStableFamilyId(
-        existing.kind,
-        existing.plan,
-        existing.slowPointOwnerCode
-      ) === identity))
-      return;
-    seeds.push(seed);
-  };
+  const familyNumericIds = [racecraftFamilyNumericId(
+    session,
+    seeds[0]!.kind,
+    seeds[0]!.plan,
+    seeds[0]!.slowPointOwnerCode
+  )];
   const ideal = acquisitionPlan(session, entry, 'ideal');
-  pushDistinctSeed({
+  appendDistinctCandidateSeed(session, seeds, familyNumericIds, {
     kind: 'ideal',
     plan: ideal,
     slowPointOwnerCode: null
@@ -1884,7 +2095,13 @@ function buildCandidateSeeds(
             evaluationClaims
           )
         : null;
-      if (seeded) pushDistinctSeed(seeded);
+      if (seeded)
+        appendDistinctCandidateSeed(
+          session,
+          seeds,
+          familyNumericIds,
+          seeded
+        );
     }
   } else {
     for (const [kind, side] of [
@@ -1909,11 +2126,22 @@ function buildCandidateSeeds(
             evaluationClaims
           )
         : null;
-      if (seeded) pushDistinctSeed(seeded);
+      if (seeded)
+        appendDistinctCandidateSeed(
+          session,
+          seeds,
+          familyNumericIds,
+          seeded
+        );
     }
   }
   if (leader && includeBrakeBehind)
-    pushDistinctSeed(brakeBehindSeed(session, entry, leader.entry));
+    appendDistinctCandidateSeed(
+      session,
+      seeds,
+      familyNumericIds,
+      brakeBehindSeed(session, entry, leader.entry)
+    );
   // `ideal` and `recenter` author the same physical acquisition. The
   // incumbent slot already preserves an in-flight recenter; evaluating a
   // second labelled copy would consume the emergency-response budget.
@@ -2025,45 +2253,70 @@ function candidateTowStrength(
   time: number,
   lateral: number,
   speed: number,
-  evaluationClaims: EvaluationClaimMap
+  evaluationClaims: EvaluationClaimMap,
+  shareRivalSnapshot = false
 ): number {
+  if (!evaluationClaims.size) return 0;
   const ownS = wrappedTrackS(
     session.trk,
     entry.car.s + progress - entry.prog
   );
-  let nearest: {
-    code: string;
-    downstream: number;
-    lateral: number;
-  } | null = null;
-  for (const [code, view] of evaluationClaims) {
-    if (code === entry.code) continue;
-    const rival = racecraftClaimStateAtTime(
-      session.trk,
-      view.claim,
-      time
-    );
-    const downstream = forwardTrackDistance(
-      session.trk,
-      ownS,
-      rival.s
-    );
-    if (downstream > TRAFFIC_NEIGHBOR_SCAN_METRES) continue;
-    if (!nearest ||
-        downstream < nearest.downstream - Number.EPSILON ||
-        (Math.abs(downstream - nearest.downstream) <= Number.EPSILON &&
-          code.localeCompare(nearest.code) < 0))
-      nearest = {
-        code,
-        downstream,
-        lateral: rival.lateral
-      };
+  let nearest: CandidateTowRivalSnapshot | undefined;
+  let byProgress: Map<number, CandidateTowRivalSnapshot> | undefined;
+  if (shareRivalSnapshot) {
+    let byEntry = candidateTowRivalSnapshots.get(evaluationClaims);
+    if (!byEntry) {
+      byEntry = new WeakMap();
+      candidateTowRivalSnapshots.set(evaluationClaims, byEntry);
+    }
+    byProgress = byEntry.get(entry);
+    if (!byProgress) {
+      byProgress = new Map();
+      byEntry.set(entry, byProgress);
+    }
+    nearest = byProgress.get(progress);
+    if (nearest) evaluatorWork(session).rivalStateCacheHits++;
   }
-  if (!nearest) return 0;
+  let nearestCode = nearest?.code ?? null;
+  let nearestDownstream = nearest?.downstream ?? 0;
+  let nearestLateral = nearest?.lateral ?? 0;
+  if (!nearest) {
+    for (const [code, view] of evaluationClaims) {
+      if (code === entry.code) continue;
+      const rival = writeRacecraftClaimStateAtTime(
+        session.trk,
+        view.claim,
+        time,
+        candidateTowStateScratch
+      );
+      const downstream = forwardTrackDistance(
+        session.trk,
+        ownS,
+        rival.s
+      );
+      if (downstream > TRAFFIC_NEIGHBOR_SCAN_METRES) continue;
+      if (nearestCode == null ||
+          downstream < nearestDownstream - Number.EPSILON ||
+          (Math.abs(downstream - nearestDownstream) <= Number.EPSILON &&
+            code.localeCompare(nearestCode) < 0)) {
+        nearestCode = code;
+        nearestDownstream = downstream;
+        nearestLateral = rival.lateral;
+      }
+    }
+    if (byProgress)
+      byProgress.set(progress, {
+        code: nearestCode,
+        downstream: nearestDownstream,
+        lateral: nearestLateral
+      });
+    evaluatorWork(session).rivalStateBuilds++;
+  }
+  if (nearestCode == null) return 0;
   const calibration = racecraftCalibration();
   return wakeEffect(
-    nearest.downstream,
-    nearest.lateral - lateral,
+    nearestDownstream,
+    nearestLateral - lateral,
     speed,
     {
       characteristicDistance: calibration.towRangeM,
@@ -2141,7 +2394,8 @@ function passiveDeceleration(
 }
 
 function forwardTrackDistance(track: Track, from: number, to: number): number {
-  return ((to - from) % track.len + track.len) % track.len;
+  const distance = to - from;
+  return distance < 0 ? distance + track.len : distance;
 }
 
 function speedLawAt(
@@ -2242,12 +2496,15 @@ function composeCandidateSpeedLaw(
       speed: claim?.originSpeed ?? owner.spd,
       publishedAt: claim?.publishedAt ?? session.t
     }];
-    for (const station of claim?.stations ?? [])
-      constraints.push({
-        stationS: station.s,
-        speed: station.speed,
-        publishedAt: claim!.publishedAt
-      });
+    if (claim)
+      for (let stationIndex = 0;
+        stationIndex < claim.stations.length;
+        stationIndex++)
+        constraints.push({
+          stationS: claim.stations.s[stationIndex]!,
+          speed: claim.stations.v[stationIndex]!,
+          publishedAt: claim.publishedAt
+        });
     for (const constraint of constraints) {
       const clearanceDistance = Math.max(
         0,
@@ -2284,7 +2541,8 @@ function composeCandidateSpeedLaw(
       estimatedTime,
       state.lateral,
       localSpeed,
-      evaluationClaims
+      evaluationClaims,
+      true
     );
     const room = longitudinalAccelerationHeadroom(
       localSpeed,
@@ -2653,7 +2911,9 @@ function programGripUtilization(
       longitudinal = Math.min(driveForce / PHYS.m, headroom);
     }
     const utilization = clamp(
-      Math.hypot(lateral, longitudinal) / grip,
+      Math.sqrt(
+        lateral * lateral + longitudinal * longitudinal
+      ) / grip,
       0,
       1
     );
@@ -2671,12 +2931,22 @@ function programGripUtilization(
   return { maximum, exposureSeconds, exposure };
 }
 
-function programStationAtTime(
+function writeProgramStationAtTime(
   track: Track,
   stations: readonly ProgramStation[],
-  time: number
+  time: number,
+  out: ProgramStation
 ): ProgramStation {
-  if (time <= stations[0]!.time) return { ...stations[0]! };
+  if (time <= stations[0]!.time) {
+    const first = stations[0]!;
+    out.time = first.time;
+    out.progress = first.progress;
+    out.s = first.s;
+    out.lateral = first.lateral;
+    out.speed = first.speed;
+    out.headingOffsetRadians = first.headingOffsetRadians;
+    return out;
+  }
   for (let index = 1; index < stations.length; index++) {
     const to = stations[index]!;
     if (time > to.time) continue;
@@ -2686,21 +2956,43 @@ function programStationAtTime(
     const blend = clamp(u, 0, 1);
     const progress = from.progress +
       (to.progress - from.progress) * blend;
-    return {
-      time,
-      progress,
-      s: (from.s + progress - from.progress) % track.len,
-      lateral: from.lateral + (to.lateral - from.lateral) * blend,
-      speed: from.speed + (to.speed - from.speed) * blend,
-      headingOffsetRadians: normAng(
-        from.headingOffsetRadians +
-        normAng(
-          to.headingOffsetRadians - from.headingOffsetRadians
-        ) * blend
-      )
-    };
+    out.time = time;
+    out.progress = progress;
+    out.s = (from.s + progress - from.progress) % track.len;
+    out.lateral = from.lateral +
+      (to.lateral - from.lateral) * blend;
+    out.speed = from.speed + (to.speed - from.speed) * blend;
+    out.headingOffsetRadians = normAng(
+      from.headingOffsetRadians +
+      normAng(
+        to.headingOffsetRadians - from.headingOffsetRadians
+      ) * blend
+    );
+    return out;
   }
-  return { ...stations.at(-1)! };
+  const last = stations[stations.length - 1]!;
+  out.time = last.time;
+  out.progress = last.progress;
+  out.s = last.s;
+  out.lateral = last.lateral;
+  out.speed = last.speed;
+  out.headingOffsetRadians = last.headingOffsetRadians;
+  return out;
+}
+
+function programStationAtTime(
+  track: Track,
+  stations: readonly ProgramStation[],
+  time: number
+): ProgramStation {
+  return writeProgramStationAtTime(track, stations, time, {
+    time: 0,
+    progress: 0,
+    s: 0,
+    lateral: 0,
+    speed: 0,
+    headingOffsetRadians: 0
+  });
 }
 
 function evaluateSeed(
@@ -2738,34 +3030,31 @@ function evaluateSeed(
         speedLaw.brakingEffort
       )
     : 0;
-  const compactStates = new Map<number, LaneState>();
-  const stateAtIndex = (index: number): LaneState => {
-    const start = cyclicIndex(session.trk, entry.car.progIdx);
-    const progress = entry.prog +
-      distanceAhead(session.trk, start, index);
-    const wrapped = cyclicIndex(session.trk, index);
-    const cached = compactStates.get(wrapped);
-    if (cached) return cached;
-    const state = laneStateAt(
+  let samplerContext = evaluatorManeuverSamplerContexts.get(entry);
+  if (!samplerContext) {
+    samplerContext = {
       session,
       entry,
-      progress,
-      seed.plan
-    );
-    compactStates.set(wrapped, state);
-    return state;
-  };
-  const sample = (index: number): number => stateAtIndex(index).lateral;
-  const sampleCurvature = (index: number): number =>
-    stateAtIndex(index).curvature;
-  const diagnostic = evaluateManeuverPlanCompact(
+      plan: seed.plan,
+      states: new Map(),
+      diagnostic: undefined
+    };
+    evaluatorManeuverSamplerContexts.set(entry, samplerContext);
+  }
+  samplerContext.session = session;
+  samplerContext.entry = entry;
+  samplerContext.plan = seed.plan;
+  samplerContext.states.clear();
+  const diagnostic = evaluateManeuverPlanCompactWithSampler(
     session,
     entry,
     seed.plan,
-    sample,
-    sampleCurvature,
-    false
+    EVALUATOR_MANEUVER_SAMPLER,
+    samplerContext,
+    false,
+    samplerContext.diagnostic
   );
+  samplerContext.diagnostic = diagnostic;
   if (!candidateRespectsAgreement(
     session,
     entry,
@@ -2812,6 +3101,13 @@ function evaluateSeed(
   const evaluation: RacecraftCandidateEvaluation = {
     kind: seed.kind,
     plan: seed.plan,
+    planNumericId: racecraftPlanNumericId(seed.plan),
+    familyNumericId: racecraftFamilyNumericId(
+      session,
+      seed.kind,
+      seed.plan,
+      seed.slowPointOwnerCode
+    ),
     feasible: diagnostic.feasible,
     vetoes: [...diagnostic.rejections],
     targetLateral,
@@ -2880,17 +3176,23 @@ export function snapshotContestedRegion(
   let previousLateral = previousOtherLateral - previousOwnLateral;
   let previousTime = 0;
   for (let stationIndex = 0; stationIndex < count; stationIndex++) {
-    const ownStation = ownClaim.stations[stationIndex]!;
-    const otherStation = otherClaim.stations[stationIndex]!;
+    const ownS = ownClaim.stations.s[stationIndex]!;
+    const otherS = otherClaim.stations.s[stationIndex]!;
+    const ownLateral = ownClaim.stations.y[stationIndex]!;
+    const otherLateral = otherClaim.stations.y[stationIndex]!;
+    const ownTime = ownClaim.stations.time[stationIndex]!;
+    const otherTime = otherClaim.stations.time[stationIndex]!;
+    const ownHeading = ownClaim.stations.heading[stationIndex]!;
+    const otherHeading = otherClaim.stations.heading[stationIndex]!;
     const longitudinal = signedTrackDistance(
       track,
-      ownStation.s,
-      otherStation.s
+      ownS,
+      otherS
     );
-    const lateral = otherStation.centre - ownStation.centre;
+    const lateral = otherLateral - ownLateral;
     const elapsed = Math.max(
       Number.EPSILON,
-      Math.min(ownStation.time, otherStation.time) - previousTime
+      Math.min(ownTime, otherTime) - previousTime
     );
     const sweep = sweptCarContactIntervals(
       previousLongitudinal,
@@ -2900,13 +3202,13 @@ export function snapshotContestedRegion(
       normAng(
         previousOwnHeading +
         normAng(
-          ownStation.headingOffsetRadians - previousOwnHeading
+          ownHeading - previousOwnHeading
         ) / 2
       ),
       normAng(
         previousOtherHeading +
         normAng(
-          otherStation.headingOffsetRadians - previousOtherHeading
+          otherHeading - previousOtherHeading
         ) / 2
       )
     )[0];
@@ -2915,9 +3217,9 @@ export function snapshotContestedRegion(
       const ownDistance = forwardTrackDistance(
         track,
         previousOwnS,
-        ownStation.s
+        ownS
       );
-      const ownS = (
+      const contactOwnS = (
         previousOwnS + ownDistance * fraction
       ) % track.len;
       const otherDistance = forwardTrackDistance(
@@ -2925,33 +3227,35 @@ export function snapshotContestedRegion(
         stationIndex === 0
           ? otherClaim.originS
           : previousOtherS,
-        otherStation.s
+        otherS
       );
-      const otherS = (
+      const contactOtherS = (
         (stationIndex === 0
           ? otherClaim.originS
           : previousOtherS) +
         otherDistance * fraction
       ) % track.len;
       const regionS = (
-        ownS + signedTrackDistance(track, ownS, otherS) / 2 + track.len
+        contactOwnS +
+        signedTrackDistance(track, contactOwnS, contactOtherS) / 2 +
+        track.len
       ) % track.len;
       return {
         index: cyclicIndex(track, regionS / track.step),
         s: regionS,
         time: previousTime +
-          (ownStation.time - previousTime) * fraction
+          (ownTime - previousTime) * fraction
       };
     }
-    previousOwnS = ownStation.s;
-    previousOtherS = otherStation.s;
-    previousOwnLateral = ownStation.centre;
-    previousOtherLateral = otherStation.centre;
-    previousOwnHeading = ownStation.headingOffsetRadians;
-    previousOtherHeading = otherStation.headingOffsetRadians;
+    previousOwnS = ownS;
+    previousOtherS = otherS;
+    previousOwnLateral = ownLateral;
+    previousOtherLateral = otherLateral;
+    previousOwnHeading = ownHeading;
+    previousOtherHeading = otherHeading;
     previousLongitudinal = longitudinal;
     previousLateral = lateral;
-    previousTime = Math.min(ownStation.time, otherStation.time);
+    previousTime = Math.min(ownTime, otherTime);
   }
   return null;
 }
@@ -2980,7 +3284,10 @@ function hazardsFor(
         claim.originHeadingOffsetRadians,
       ownClaim: ownClaim ?? null,
       region: undefined,
-      adaptResponsibility: null
+      adaptResponsibility: null,
+      rivalSweepGeometry: null,
+      bestPlanContinuation: null,
+      bestPlanContinuationResolved: false
     };
     hazards.push(hazard);
   }
@@ -3012,7 +3319,160 @@ function evaluationClaimsAt(
 }
 
 function wrappedTrackS(track: Track, s: number): number {
-  return ((s % track.len) + track.len) % track.len;
+  // Evaluator advances are shorter than one lap; preserving that bound turns
+  // a general modulo into the exact single-wrap operation it represents.
+  if (s >= track.len) return s - track.len;
+  if (s < 0) return s + track.len;
+  return s;
+}
+
+interface WorldBodyPose {
+  x: number;
+  y: number;
+  headingRadians: number;
+}
+
+/**
+ * Convert one Frenet point to the fixed world frame consumed by the physical
+ * four-circle sweep. Sweeping independently sampled track-frame coordinates
+ * would rotate the frame between samples and invent non-physical closing
+ * speeds in curved or long terminal rollouts.
+ */
+function worldBodyPose(
+  track: Track,
+  s: number,
+  lateral: number,
+  headingOffsetRadians: number
+): WorldBodyPose {
+  const sample = wrappedTrackS(track, s) / track.step;
+  const fromIndex = Math.floor(sample) % track.n;
+  const toIndex = (fromIndex + 1) % track.n;
+  const amount = sample - Math.floor(sample);
+  const tangentFrom = Math.atan2(
+    track.ty[fromIndex]!,
+    track.tx[fromIndex]!
+  );
+  const tangentTo = tangentFrom + normAng(
+    Math.atan2(track.ty[toIndex]!, track.tx[toIndex]!) -
+      tangentFrom
+  );
+  const tangent = tangentFrom +
+    (tangentTo - tangentFrom) * amount;
+  const centreX = track.x[fromIndex]! +
+    (track.x[toIndex]! - track.x[fromIndex]!) * amount;
+  const centreY = track.y[fromIndex]! +
+    (track.y[toIndex]! - track.y[fromIndex]!) * amount;
+  return {
+    x: centreX - Math.sin(tangent) * lateral,
+    y: centreY + Math.cos(tangent) * lateral,
+    headingRadians: normAng(tangent + headingOffsetRadians)
+  };
+}
+
+function relativeWorldBodyPose(
+  track: Track,
+  ego: {
+    s: number;
+    lateral: number;
+    headingOffsetRadians: number;
+  },
+  rival: {
+    s: number;
+    lateral: number;
+    headingOffsetRadians: number;
+  }
+): {
+  relativeLongitudinal: number;
+  relativeLateral: number;
+  egoHeadingRadians: number;
+  rivalHeadingRadians: number;
+} {
+  const egoWorld = worldBodyPose(
+    track,
+    ego.s,
+    ego.lateral,
+    ego.headingOffsetRadians
+  );
+  const rivalWorld = worldBodyPose(
+    track,
+    rival.s,
+    rival.lateral,
+    rival.headingOffsetRadians
+  );
+  return {
+    relativeLongitudinal: rivalWorld.x - egoWorld.x,
+    relativeLateral: rivalWorld.y - egoWorld.y,
+    egoHeadingRadians: egoWorld.headingRadians,
+    rivalHeadingRadians: rivalWorld.headingRadians
+  };
+}
+
+function relativeWorldPose(
+  egoWorld: WorldBodyPose,
+  rivalWorld: WorldBodyPose
+): {
+  relativeLongitudinal: number;
+  relativeLateral: number;
+  egoHeadingRadians: number;
+  rivalHeadingRadians: number;
+} {
+  return {
+    relativeLongitudinal: rivalWorld.x - egoWorld.x,
+    relativeLateral: rivalWorld.y - egoWorld.y,
+    egoHeadingRadians: egoWorld.headingRadians,
+    rivalHeadingRadians: rivalWorld.headingRadians
+  };
+}
+
+function rivalSweepGeometry(
+  session: Session,
+  hazard: Hazard
+): NonNullable<Hazard['rivalSweepGeometry']> {
+  if (hazard.rivalSweepGeometry) {
+    evaluatorWork(session).rivalSweepCacheHits++;
+    return hazard.rivalSweepGeometry;
+  }
+  const track = session.trk;
+  const claim = hazard.claim;
+  const shared = rivalSweepGeometryByClaim.get(claim);
+  if (shared &&
+      shared.track === track &&
+      shared.publishedAt === claim.publishedAt &&
+      shared.publicationRevision === claim.publicationRevision &&
+      shared.predictionKey === claim.predictionKey) {
+    hazard.rivalSweepGeometry = shared.geometry;
+    evaluatorWork(session).rivalSweepCacheHits++;
+    return shared.geometry;
+  }
+  const stationGeometry = new Array<WorldBodyPose>(
+    claim.stations.length
+  );
+  for (let index = 0; index < claim.stations.length; index++)
+    stationGeometry[index] = worldBodyPose(
+      track,
+      claim.stations.s[index]!,
+      claim.stations.y[index]!,
+      claim.stations.heading[index]!
+    );
+  const geometry = {
+    origin: worldBodyPose(
+      track,
+      hazard.originS,
+      hazard.originLateral,
+      hazard.originHeadingOffsetRadians
+    ),
+    stations: stationGeometry
+  };
+  hazard.rivalSweepGeometry = geometry;
+  rivalSweepGeometryByClaim.set(claim, {
+    track,
+    publishedAt: claim.publishedAt,
+    publicationRevision: claim.publicationRevision,
+    predictionKey: claim.predictionKey,
+    geometry
+  });
+  evaluatorWork(session).rivalSweepBuilds++;
+  return geometry;
 }
 
 function publicationRevision(
@@ -3098,7 +3558,7 @@ export function racecraftDecisionAuthorityKey(
   const attackers = ordered.flatMap(neighbor => {
     const decision = neighbor.racecraftDecision;
     const selected = decision?.candidates.find(candidate =>
-      candidate.plan.key === decision.selectedPlanKey);
+      candidate.planNumericId === decision.selectedPlanNumericId);
     if (!selected || selected.kind === 'hold' ||
         selected.kind === 'brake-behind' ||
         selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
@@ -3147,12 +3607,14 @@ function makeDecisionCertificate(
   session: Session,
   entry: Entry,
   neighbors: readonly Entry[],
+  selectedFamilyNumericId: number | null,
   selectedFamilyId: string | null,
   zeroHazardIdeal: boolean
 ): RacecraftDecision['certificate'] {
   const ordered = [...neighbors].sort((left, right) =>
     left.code.localeCompare(right.code));
   return {
+    selectedFamilyNumericId,
     selectedFamilyId,
     neighborCodes: ordered.map(neighbor => neighbor.code),
     claimRevisions:
@@ -3210,26 +3672,34 @@ function rebindClaimToStandingEpoch(
   current: RacecraftClaim,
   elapsed: number
 ): RacecraftClaim {
+  const stations = createRacecraftClaimStations(
+    previous.stations.length
+  );
+  stations.length = previous.stations.length;
+  for (let index = 0; index < stations.length; index++) {
+    const stationTime = previous.stations.time[index]!;
+    stations.time[index] = stationTime;
+    if (stationTime <= elapsed + Number.EPSILON) {
+      stations.s[index] = previous.stations.s[index]!;
+      stations.v[index] = previous.stations.v[index]!;
+      stations.y[index] = previous.stations.y[index]!;
+      stations.heading[index] = previous.stations.heading[index]!;
+      continue;
+    }
+    const rebound = racecraftClaimStateAtTime(
+      track,
+      current,
+      stationTime - elapsed
+    );
+    stations.s[index] = rebound.s;
+    stations.v[index] = rebound.speed;
+    stations.y[index] = rebound.lateral;
+    stations.heading[index] = rebound.headingOffsetRadians;
+  }
   return {
     ...previous,
     publicationRevision: current.publicationRevision,
-    stations: previous.stations.map(station => {
-      if (station.time <= elapsed + Number.EPSILON)
-        return station;
-      const rebound = racecraftClaimStateAtTime(
-        track,
-        current,
-        station.time - elapsed
-      );
-      return {
-        ...station,
-        index: cyclicIndex(track, rebound.s / track.step),
-        s: rebound.s,
-        speed: rebound.speed,
-        centre: rebound.lateral,
-        headingOffsetRadians: rebound.headingOffsetRadians
-      };
-    })
+    stations
   };
 }
 
@@ -3425,15 +3895,14 @@ function incrementalClaimRevisionIsInsideTieBand(
     const rebound = evaluationClaims.get(previous.other.code)?.claim;
     if (!reboundCodes.includes(previous.other.code) || !rebound)
       return previous;
-    const {
-      bestPlanContinuation: _discardedContinuation,
-      ...withoutContinuation
-    } = previous;
     return {
-      ...withoutContinuation,
+      ...previous,
       claim: rebound,
       region: undefined,
-      adaptResponsibility: null
+      adaptResponsibility: null,
+      rivalSweepGeometry: null,
+      bestPlanContinuation: null,
+      bestPlanContinuationResolved: false
     } satisfies Hazard;
   });
   const evaluationSession = snapshot.session;
@@ -3533,7 +4002,7 @@ function selectedAnalyticAnchorHasAged(
 ): boolean {
   const decision = entry.racecraftDecision;
   const selected = decision?.candidates.find(candidate =>
-    candidate.plan.key === decision.selectedPlanKey);
+    candidate.planNumericId === decision.selectedPlanNumericId);
   if (!selected || selected.kind === 'hold' ||
       selected.kind === 'brake-behind' ||
       selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
@@ -3621,6 +4090,7 @@ export function renewPublishedEmergencyCertificate(
     session,
     entry,
     neighbors,
+    decision.certificate.selectedFamilyNumericId,
     decision.certificate.selectedFamilyId,
     decision.certificate.zeroHazardIdeal
   );
@@ -3663,28 +4133,29 @@ function oneIntervalHazardWindow(
     hazard.claim,
     sourceStartTime
   );
-  const stations = program.stations.slice(1).map(egoStation => {
+  const stationCount = Math.max(0, program.stations.length - 1);
+  const stations = createRacecraftClaimStations(stationCount);
+  stations.length = stationCount;
+  for (let index = 0; index < stationCount; index++) {
+    const egoStation = program.stations[index + 1]!;
     const absoluteTime = sourceStartTime + egoStation.time;
     const predicted = racecraftClaimStateAtTime(
       track,
       hazard.claim,
       absoluteTime
     );
-    const stationIndex = cyclicIndex(track, predicted.s / track.step);
-    return {
-      index: stationIndex,
-      time: egoStation.time,
-      s: predicted.s,
-      speed: predicted.speed,
-      centre: predicted.lateral,
-      headingOffsetRadians: predicted.headingOffsetRadians
-    };
-  });
+    stations.time[index] = egoStation.time;
+    stations.s[index] = predicted.s;
+    stations.v[index] = predicted.speed;
+    stations.y[index] = predicted.lateral;
+    stations.heading[index] = predicted.headingOffsetRadians;
+  }
   return {
     ...hazard,
     originS: start.s,
     originLateral: start.lateral,
     originHeadingOffsetRadians: start.headingOffsetRadians,
+    rivalSweepGeometry: null,
     claim: {
       ...hazard.claim,
       publishedAt: session.t + sourceStartTime,
@@ -3703,6 +4174,19 @@ interface RelativePointStation {
   lateralMetres: number;
 }
 
+/**
+ * Keep a wrapped track separation on the branch nearest the preceding point.
+ * Independent shortest-distance samples can jump by a full lap at the
+ * half-lap seam, inventing a high-speed sweep through the rival.
+ */
+function continuousRelativeTrackDistance(
+  track: Track,
+  previous: number,
+  wrapped: number
+): number {
+  return wrapped + Math.round((previous - wrapped) / track.len) * track.len;
+}
+
 export interface RacecraftPointTrajectoryScreenOrigin {
   longitudinalMetres: number;
   lateralMetres: number;
@@ -3714,7 +4198,9 @@ export function racecraftPointTrajectoriesMayIntersect(
   stations: readonly RelativePointStation[],
   physicalMarginMetres = 0
 ): boolean {
-  const extent = Math.hypot(PHYS.carLen, PHYS.carWid) +
+  const extent = Math.sqrt(
+    PHYS.carLen * PHYS.carLen + PHYS.carWid * PHYS.carWid
+  ) +
     Math.max(0, physicalMarginMetres);
   let previous = origin;
   for (const station of stations) {
@@ -3753,27 +4239,46 @@ function relativePointStations(
     direction: -1 | 1;
   } | null
 ): RelativePointStation[] {
-  return hazard.claim.stations.map((station, index) => {
-    const ego = programStationAtTime(
+  let previousLongitudinal = signedTrackDistance(
+    session.trk,
+    program.stations[0]!.s,
+    hazard.originS
+  );
+  const stations = new Array<RelativePointStation>(
+    hazard.claim.stations.length
+  );
+  for (let index = 0; index < stations.length; index++) {
+    const stationTime = hazard.claim.stations.time[index]!;
+    const ego = writeProgramStationAtTime(
       session.trk,
       program.stations,
-      station.time
+      stationTime,
+      programStationScratchA
     );
     const perturbation =
       lateralPerturbation?.stationIndex === index
         ? lateralPerturbation.direction *
           hazard.claim.lateralTrackingErrorThresholdMetres
         : 0;
-    return {
-      timeSeconds: station.time,
-      longitudinalMetres: signedTrackDistance(
-        session.trk,
-        ego.s,
-        station.s
-      ),
-      lateralMetres: station.centre + perturbation - ego.lateral
+    const wrappedLongitudinal = signedTrackDistance(
+      session.trk,
+      ego.s,
+      hazard.claim.stations.s[index]!
+    );
+    const longitudinalMetres = continuousRelativeTrackDistance(
+      session.trk,
+      previousLongitudinal,
+      wrappedLongitudinal
+    );
+    previousLongitudinal = longitudinalMetres;
+    stations[index] = {
+      timeSeconds: stationTime,
+      longitudinalMetres,
+      lateralMetres:
+        hazard.claim.stations.y[index]! + perturbation - ego.lateral
     };
-  });
+  }
+  return stations;
 }
 
 function pointTrajectoryBound(
@@ -3830,17 +4335,15 @@ function boundProgramHazard(
   program: CandidateProgram,
   hazard: Hazard
 ): RelativePointStation[] | null {
-  const cached = program.bounds.get(hazard.key);
-  if (cached === false) return null;
-  if (cached === true)
-    return relativePointStations(session, program, hazard, null);
+  if (program.bounds.has(hazard.key))
+    return program.bounds.get(hazard.key) ?? null;
   const stations = boundedRelativeStations(
     session,
     program,
     hazard,
     null
   );
-  program.bounds.set(hazard.key, stations != null);
+  program.bounds.set(hazard.key, stations);
   return stations;
 }
 
@@ -3850,35 +4353,61 @@ function firstSweptContact(
   hazard: Hazard,
   points: readonly RelativePointStation[] =
     relativePointStations(session, program, hazard, null),
-  physicalMarginMetres = 0
+  physicalMarginMetres = 0,
+  lateralPerturbation: {
+    stationIndex: number;
+    direction: -1 | 1;
+  } | null = null
 ): SweptContact | null {
   evaluatorWork(session).deterministicSweeps++;
   const origin = program.stations[0]!;
-  const poses = [{
-    timeSeconds: 0,
-    relativeLongitudinal: signedTrackDistance(
+  const rivalGeometry = rivalSweepGeometry(session, hazard);
+  const originPose = relativeWorldPose(
+    worldBodyPose(
       session.trk,
       origin.s,
-      hazard.originS
+      origin.lateral,
+      origin.headingOffsetRadians
     ),
-    relativeLateral: hazard.originLateral - origin.lateral,
-    egoHeadingRadians: origin.headingOffsetRadians,
-    rivalHeadingRadians: hazard.originHeadingOffsetRadians
+    rivalGeometry.origin
+  );
+  const poses = [{
+    timeSeconds: 0,
+    ...originPose
   }];
   for (let index = 0; index < points.length; index++) {
     const point = points[index]!;
-    const ego = programStationAtTime(
+    const ego = writeProgramStationAtTime(
       session.trk,
       program.stations,
-      point.timeSeconds
+      point.timeSeconds,
+      programStationScratchA
     );
-    const rivalStation = hazard.claim.stations[index]!;
+    const perturbation =
+      lateralPerturbation?.stationIndex === index
+        ? lateralPerturbation.direction *
+          hazard.claim.lateralTrackingErrorThresholdMetres
+        : 0;
+    const rivalWorld = perturbation === 0
+      ? rivalGeometry.stations[index]!
+      : worldBodyPose(
+          session.trk,
+          hazard.claim.stations.s[index]!,
+          hazard.claim.stations.y[index]! + perturbation,
+          hazard.claim.stations.heading[index]!
+        );
+    const pose = relativeWorldPose(
+      worldBodyPose(
+        session.trk,
+        ego.s,
+        ego.lateral,
+        ego.headingOffsetRadians
+      ),
+      rivalWorld
+    );
     poses.push({
       timeSeconds: point.timeSeconds,
-      relativeLongitudinal: point.longitudinalMetres,
-      relativeLateral: point.lateralMetres,
-      egoHeadingRadians: ego.headingOffsetRadians,
-      rivalHeadingRadians: rivalStation.headingOffsetRadians
+      ...pose
     });
   }
   const episodes = sweptCarContactEpisodes(
@@ -3887,10 +4416,11 @@ function firstSweptContact(
   );
   const first = episodes[0];
   if (!first) return null;
-  const ego = programStationAtTime(
+  const ego = writeProgramStationAtTime(
     session.trk,
     program.stations,
-    first.startTimeSeconds
+    first.startTimeSeconds,
+    programStationScratchA
   );
   return {
     time: first.startTimeSeconds,
@@ -4102,16 +4632,53 @@ function programExtendedToProgress(
   };
 }
 
+function retainBestPlanContinuation(
+  session: Session,
+  hazard: Hazard,
+  value: BestPlanContinuation | null
+): BestPlanContinuation | null {
+  const claim = hazard.claim;
+  const retained = value
+    ? cloneBestPlanContinuation(value)
+    : null;
+  hazard.bestPlanContinuation = retained;
+  hazard.bestPlanContinuationResolved = true;
+  bestPlanContinuationByClaim.set(claim, {
+    session,
+    other: hazard.other,
+    publishedAt: claim.publishedAt,
+    publicationRevision: claim.publicationRevision,
+    predictionKey: claim.predictionKey,
+    value
+  });
+  evaluatorWork(session).rivalContinuationBuilds++;
+  return retained;
+}
+
 function bestPlanContinuationForHazard(
   session: Session,
   hazard: Hazard,
   evaluationClaims: EvaluationClaimMap
-): NonNullable<Hazard['bestPlanContinuation']> | null {
-  if (hazard.bestPlanContinuation !== undefined)
+): BestPlanContinuation | null {
+  if (hazard.bestPlanContinuationResolved)
     return hazard.bestPlanContinuation;
+  const claim = hazard.claim;
+  const shared = bestPlanContinuationByClaim.get(claim);
+  if (shared &&
+      shared.session === session &&
+      shared.other === hazard.other &&
+      shared.publishedAt === claim.publishedAt &&
+      shared.publicationRevision === claim.publicationRevision &&
+      shared.predictionKey === claim.predictionKey) {
+    hazard.bestPlanContinuation = shared.value
+      ? cloneBestPlanContinuation(shared.value)
+      : null;
+    hazard.bestPlanContinuationResolved = true;
+    evaluatorWork(session).rivalContinuationCacheHits++;
+    return hazard.bestPlanContinuation;
+  }
   if (hazard.claim.source === 'ballistic') {
-    hazard.bestPlanContinuation = null;
-    return null;
+    return retainBestPlanContinuation(session, hazard, null);
   }
   const rival = hazard.other;
   let kind: RacecraftCandidateKind;
@@ -4120,8 +4687,7 @@ function bestPlanContinuationForHazard(
   if (hazard.claim.source === 'rederived') {
     const rederived = rival._racecraftRederivedProgram;
     if (!rederived) {
-      hazard.bestPlanContinuation = null;
-      return null;
+      return retainBestPlanContinuation(session, hazard, null);
     }
     kind = rederived.kind;
     sourcePlan = rederived.plan;
@@ -4143,8 +4709,7 @@ function bestPlanContinuationForHazard(
     slowPointOwnerCode
   );
   if (!hazard.claim.predictionKey.endsWith(familyId)) {
-    hazard.bestPlanContinuation = null;
-    return null;
+    return retainBestPlanContinuation(session, hazard, null);
   }
   const plan = reanchorSelectedFamily(
     session,
@@ -4152,8 +4717,7 @@ function bestPlanContinuationForHazard(
     sourcePlan
   );
   if (!plan) {
-    hazard.bestPlanContinuation = null;
-    return null;
+    return retainBestPlanContinuation(session, hazard, null);
   }
   const speedLaw = composeCandidateSpeedLaw(
     session,
@@ -4163,7 +4727,9 @@ function bestPlanContinuationForHazard(
     session.entries,
     evaluationClaims
   );
-  const claimHorizon = hazard.claim.stations.at(-1)?.time ?? 0;
+  const claimHorizon = hazard.claim.stations.length > 0
+    ? hazard.claim.stations.time[hazard.claim.stations.length - 1]!
+    : 0;
   const publishedEndpoint = racecraftClaimStateAtTime(
     session.trk,
     hazard.claim,
@@ -4187,8 +4753,7 @@ function bestPlanContinuationForHazard(
     }],
     evaluationClaims
   };
-  hazard.bestPlanContinuation = continuation;
-  return continuation;
+  return retainBestPlanContinuation(session, hazard, continuation);
 }
 
 function bestPlanStateAtTime(
@@ -4197,7 +4762,9 @@ function bestPlanStateAtTime(
   evaluationClaims: EvaluationClaimMap,
   time: number
 ): RacecraftClaimState | null {
-  const claimHorizon = hazard.claim.stations.at(-1)?.time ?? 0;
+  const claimHorizon = hazard.claim.stations.length > 0
+    ? hazard.claim.stations.time[hazard.claim.stations.length - 1]!
+    : 0;
   if (time <= claimHorizon + Number.EPSILON)
     return racecraftClaimStateAtTime(
       session.trk,
@@ -4300,17 +4867,18 @@ function offHorizonAttackContact(
       station.time
     );
     if (!rival) return null;
+    const pose = relativeWorldBodyPose(
+      session.trk,
+      station,
+      {
+        s: rival.s,
+        lateral: rival.lateral + perturbation,
+        headingOffsetRadians: rival.headingOffsetRadians
+      }
+    );
     poses.push({
       timeSeconds: station.time,
-      relativeLongitudinal: signedTrackDistance(
-        session.trk,
-        station.s,
-        rival.s
-      ),
-      relativeLateral:
-        rival.lateral + perturbation - station.lateral,
-      egoHeadingRadians: station.headingOffsetRadians,
-      rivalHeadingRadians: rival.headingOffsetRadians
+      ...pose
     });
   }
   const episodes = sweptCarContactEpisodes(poses);
@@ -4364,7 +4932,9 @@ function mayCreateOffHorizonContest(
   );
   const remainingProgress = terminal - horizon.progress;
   return rivalAhead <=
-    remainingProgress + Math.hypot(PHYS.carLen, PHYS.carWid);
+    remainingProgress + Math.sqrt(
+      PHYS.carLen * PHYS.carLen + PHYS.carWid * PHYS.carWid
+    );
 }
 
 function programHazardClearance(
@@ -4390,16 +4960,17 @@ function programHazardClearance(
   let bindingStationIndex = -1;
   for (let index = 0; index < points.length; index++) {
     const point = points[index]!;
-    const ego = programStationAtTime(
+    const ego = writeProgramStationAtTime(
       session.trk,
       program.stations,
-      point.timeSeconds
+      point.timeSeconds,
+      programStationScratchA
     );
-    const rivalStation = hazard.claim.stations[index]!;
-    const egoPrevious = programStationAtTime(
+    const egoPrevious = writeProgramStationAtTime(
       session.trk,
       program.stations,
-      previousTime
+      previousTime,
+      programStationScratchB
     );
     const egoHeading = normAng(
       egoPrevious.headingOffsetRadians +
@@ -4411,7 +4982,7 @@ function programHazardClearance(
     const rivalHeading = normAng(
       previousOtherHeading +
       normAng(
-        rivalStation.headingOffsetRadians -
+        hazard.claim.stations.heading[index]! -
         previousOtherHeading
       ) / 2
     );
@@ -4434,7 +5005,7 @@ function programHazardClearance(
     relativeLongitudinal = point.longitudinalMetres;
     relativeLateral = point.lateralMetres;
     previousTime = point.timeSeconds;
-    previousOtherHeading = rivalStation.headingOffsetRadians;
+    previousOtherHeading = hazard.claim.stations.heading[index]!;
   }
   return {
     stationIndex: bindingStationIndex,
@@ -4454,24 +5025,30 @@ function conditionedResponseProgram(
   response: CandidateProgram,
   delaySeconds: number
 ): CandidateProgram {
-  const stations = current.stations.map(station => {
-    if (station.time <= delaySeconds + Number.EPSILON)
-      return { ...station };
+  const stations = new Array<ProgramStation>(current.stations.length);
+  for (let index = 0; index < current.stations.length; index++) {
+    const station = current.stations[index]!;
+    if (station.time <= delaySeconds + Number.EPSILON) {
+      stations[index] = { ...station };
+      continue;
+    }
     const responseTime = station.time - delaySeconds;
-    const responseBase = programStationAtTime(
+    const responseBase = writeProgramStationAtTime(
       session.trk,
       response.stations,
-      responseTime
+      responseTime,
+      programStationScratchA
     );
-    const conditionedBase = programStationAtTime(
+    const conditionedBase = writeProgramStationAtTime(
       session.trk,
       conditionedBaseline.stations,
-      responseTime
+      responseTime,
+      programStationScratchB
     );
     const progressDelta =
       responseBase.progress - conditionedBase.progress;
     const progress = station.progress + progressDelta;
-    return {
+    stations[index] = {
       time: station.time,
       progress,
       s: wrappedTrackS(session.trk, station.s + progressDelta),
@@ -4489,8 +5066,15 @@ function conditionedResponseProgram(
         )
       )
     };
-  });
-  return { ...response, stations };
+  }
+  return {
+    ...response,
+    stations,
+    // The conditioned prefix changes the extension's initial state. Reusing
+    // the source response's progress-keyed tail would splice stations
+    // authored from a different state into this program.
+    authoredExtensions: new Map()
+  };
 }
 
 function clearsOneIntervalPhysicalBound(
@@ -5014,8 +5598,56 @@ function responseCompletionSeconds(
 }
 
 function contactLossSeconds(contact: SweptContact | null): number {
-  if (!contact) return 0;
-  return measuredContactEpisodeLossSeconds(contact.episodes);
+  return contact
+    ? measuredContactEpisodeLossSeconds(contact.episodes)
+    : 0;
+}
+
+function resolveHazardResponseOption(
+  option: HazardResponseOption
+): number {
+  if (option.q != null) return option.q;
+  let q = option.qLowerBound;
+  for (const contact of option.unresolvedContacts ?? []) {
+    const bound = measuredContactEpisodeLossBound(contact.episodes);
+    q += contactLossSeconds(contact) - bound.lowerBoundSeconds;
+  }
+  option.q = q;
+  option.unresolvedContacts = null;
+  return q;
+}
+
+function minimumHazardResponseOption(
+  options: readonly HazardResponseOption[],
+  includeEmergency: boolean
+): HazardResponseOption | null {
+  let best: HazardResponseOption | null = null;
+  for (const option of options) {
+    if (!includeEmergency && option.emergency || option.q == null) continue;
+    if (!best ||
+        option.q < best.q! ||
+        (option.q === best.q && option.order < best.order))
+      best = option;
+  }
+  let unresolved: HazardResponseOption | null = null;
+  for (const option of options) {
+    if (!includeEmergency && option.emergency || option.q != null) continue;
+    if (!unresolved ||
+        option.qLowerBound < unresolved.qLowerBound ||
+        (option.qLowerBound === unresolved.qLowerBound &&
+          option.order < unresolved.order))
+      unresolved = option;
+  }
+  if (unresolved && (
+    !best ||
+    unresolved.qLowerBound < best.q! ||
+    (unresolved.qLowerBound === best.q &&
+      unresolved.order < best.order)
+  )) {
+    resolveHazardResponseOption(unresolved);
+    return minimumHazardResponseOption(options, includeEmergency);
+  }
+  return best;
 }
 
 function programCarriesUtilizationRisk(program: CandidateProgram): boolean {
@@ -5056,7 +5688,9 @@ function evaluateHazard(
         session,
         program,
         hazard,
-        stations
+        stations,
+        0,
+        lateralPerturbation
       )
     : null) ??
     offHorizonAttackContact(
@@ -5087,7 +5721,6 @@ function evaluateHazard(
     program,
     targetProgress
   );
-  const physicalLoss = contactLossSeconds(contact);
   if (!lateralPerturbation &&
       contact.time >
         MANEUVER_PREDICTION.horizonSeconds + Number.EPSILON) {
@@ -5106,13 +5739,15 @@ function evaluateHazard(
   const actuationSeconds = PATH_FOLLOWER_SETTLE_DISTANCE /
     Math.max(Number.EPSILON, atNextDecision.speed);
   if (contact.time <
-      RACECRAFT_DECISION_INTERVAL_SECONDS + actuationSeconds)
+      RACECRAFT_DECISION_INTERVAL_SECONDS + actuationSeconds) {
+    const physicalLoss = contactLossSeconds(contact);
     return {
       seconds: physicalLoss,
       billSeconds: physicalLoss,
       recourseSeconds: 0,
       bindingStationIndex: contact.stationIndex
     };
+  }
 
   const currentContinuationRisk =
     programCarriesUtilizationRisk(program)
@@ -5142,11 +5777,10 @@ function evaluateHazard(
         program.speedLaw.brakingEffort
       )
   };
-  const evaluateResponse = (response: CandidateProgram): {
-    q: number;
-    waitSlack: number;
-    emergency: boolean;
-  } | null => {
+  const evaluateResponse = (
+    response: CandidateProgram,
+    order: number
+  ): HazardResponseOption | null => {
     if (!response.evaluation.feasible ||
         response === program) return null;
     const responseThroughContact = programExtendedToProgress(
@@ -5177,7 +5811,8 @@ function evaluateHazard(
       responseThroughContact,
       RACECRAFT_DECISION_INTERVAL_SECONDS + actuationSeconds
     );
-    let residualSeconds = 0;
+    let residualLowerBoundSeconds = 0;
+    const unresolvedContacts: SweptContact[] = [];
     for (const residualHazard of hazards) {
       const residualPoints = relativePointStations(
         session,
@@ -5197,7 +5832,11 @@ function evaluateHazard(
               session,
               delayed,
               residualHazard,
-              residualPoints
+              residualPoints,
+              0,
+              residualHazard === hazard
+                ? lateralPerturbation
+                : null
             )
           : null
       ) ?? offHorizonAttackContact(
@@ -5208,7 +5847,11 @@ function evaluateHazard(
       );
       if (!residualContact) continue;
       if (damagingContact(residualContact)) return null;
-      residualSeconds += contactLossSeconds(residualContact);
+      const loss = measuredContactEpisodeLossBound(
+        residualContact.episodes
+      );
+      residualLowerBoundSeconds += loss.lowerBoundSeconds;
+      if (!loss.exact) unresolvedContacts.push(residualContact);
     }
     const responsePlan = delayed.evaluation.plan;
     const emergency =
@@ -5225,8 +5868,7 @@ function evaluateHazard(
             contact.time
           )
         : 0;
-    return {
-      q: incrementalContinuationTimeSeconds(
+    const qLowerBound = incrementalContinuationTimeSeconds(
         session,
         entry,
         program,
@@ -5235,33 +5877,40 @@ function evaluateHazard(
       ) +
         responseContinuationRisk -
         currentContinuationRisk +
-        residualSeconds,
+        residualLowerBoundSeconds;
+    return {
+      q: unresolvedContacts.length ? null : qLowerBound,
+      qLowerBound,
       waitSlack: slack.waitSeconds,
-      emergency
+      emergency,
+      order,
+      unresolvedContacts: unresolvedContacts.length
+        ? unresolvedContacts
+        : null
     };
   };
-  const options = responsePrograms
-    .map(evaluateResponse)
-    .filter((option): option is NonNullable<typeof option> =>
-      option != null);
-  let bestContinuation = physicalLoss;
-  let bestNormal: { q: number; waitSlack: number } | null = null;
-  for (const option of options) {
-    if (option.emergency) continue;
-    if (!bestNormal || option.q < bestNormal.q)
-      bestNormal = option;
-    bestContinuation = Math.min(bestContinuation, option.q);
+  const options: HazardResponseOption[] = [];
+  for (let order = 0; order < responsePrograms.length; order++) {
+    const option = evaluateResponse(responsePrograms[order]!, order);
+    if (option) options.push(option);
   }
+  const physicalLossBound = measuredContactEpisodeLossBound(
+    contact.episodes
+  );
+  const bestNormal = minimumHazardResponseOption(options, false);
   const normalResponseExpired =
     bestNormal == null || bestNormal.waitSlack <= 0;
-  if (normalResponseExpired) {
-    for (const option of options) {
-      if (!option.emergency) continue;
-      bestContinuation = Math.min(bestContinuation, option.q);
-    }
-    if (!lateralPerturbation)
-      program.emergencyHazards.set(hazard.key, contact.time);
-  }
+  const bestResponse = minimumHazardResponseOption(
+    options,
+    normalResponseExpired
+  );
+  if (normalResponseExpired && !lateralPerturbation)
+    program.emergencyHazards.set(hazard.key, contact.time);
+  let bestContinuation = bestResponse?.q ?? Infinity;
+  if (physicalLossBound.lowerBoundSeconds < bestContinuation)
+    bestContinuation = physicalLossBound.exact
+      ? physicalLossBound.lowerBoundSeconds
+      : contactLossSeconds(contact);
   const adaptResponsibility =
     hazard.adaptResponsibility ??=
       responsibility(session, entry, hazard);
@@ -5322,19 +5971,23 @@ function scorePrograms(
   session: Session,
   entry: ActiveEntry,
   programs: CandidateProgram[],
-  hazards: readonly Hazard[]
+  hazards: readonly Hazard[],
+  responsePrograms: readonly CandidateProgram[] = programs
 ): void {
+  let scratch = scoreProgramsScratchBySession.get(session);
+  if (!scratch) {
+    scratch = { hazards: [], stations: [], clearances: [] };
+    scoreProgramsScratchBySession.set(session, scratch);
+  }
+  const boundedHazards = scratch.hazards;
+  const boundedStations = scratch.stations;
+  const boundedClearances = scratch.clearances;
   for (const program of programs) {
     const evaluation = program.evaluation;
     if (!evaluation.feasible) continue;
-    const boundedHazards: Array<{
-      hazard: Hazard;
-      stations: RelativePointStation[] | null;
-      clearance: {
-        stationIndex: number;
-        clearanceMetres: number;
-      } | null;
-    }> = [];
+    boundedHazards.length = 0;
+    boundedStations.length = 0;
+    boundedClearances.length = 0;
     for (const hazard of hazards) {
       const stations = boundProgramHazard(
         session,
@@ -5357,10 +6010,14 @@ function scorePrograms(
                 evaluation.minimumPlannedClearanceMetres))
           evaluation.minimumPlannedClearanceMetres =
             clearance.clearanceMetres;
-        boundedHazards.push({ hazard, stations, clearance });
+        boundedHazards.push(hazard);
+        boundedStations.push(stations);
+        boundedClearances.push(clearance);
       } else {
         program.perturbations.set(hazard.key, {
           base: 0,
+          billSeconds: 0,
+          recourseSeconds: 0,
           bindingStationIndex: -1
         });
       }
@@ -5393,15 +6050,19 @@ function scorePrograms(
       : 0;
     evaluation.effortRiskSeconds = surfaceRisk;
     let hazardCost = surfaceRisk;
-    for (const bounded of boundedHazards) {
-      const { hazard, stations, clearance } = bounded;
+    for (let boundedIndex = 0;
+      boundedIndex < boundedHazards.length;
+      boundedIndex++) {
+      const hazard = boundedHazards[boundedIndex]!;
+      const stations = boundedStations[boundedIndex]!;
+      const clearance = boundedClearances[boundedIndex]!;
       const cost = evaluateHazard(
         session,
         entry,
         program,
         hazard,
         hazards,
-        programs,
+        responsePrograms,
         null,
         stations,
         clearance
@@ -5414,6 +6075,8 @@ function scorePrograms(
       if (!evaluation.feasible) break;
       program.perturbations.set(hazard.key, {
         base: cost.seconds,
+        billSeconds: cost.billSeconds,
+        recourseSeconds: cost.recourseSeconds,
         bindingStationIndex: cost.bindingStationIndex
       });
     }
@@ -5433,28 +6096,25 @@ function applyBattleEconomics(
     const evaluation = program.evaluation;
     if (!evaluation.feasible || !Number.isFinite(evaluation.cost))
       continue;
-    const activeContexts = contexts.filter(context =>
-      battleProgram(program, context));
-    evaluation.positionValueSeconds = contexts.reduce(
-      (sum, context) => sum + (
-        activeContexts.includes(context)
-          ? 0
-          : context.positionValueSeconds
-      ),
-      0
-    );
-    const familyId = racecraftStableFamilyId(
-      evaluation.kind,
-      evaluation.plan,
-      evaluation.slowPointOwnerCode
-    );
-    const continuingBattle = activeContexts.some(context =>
-      context.state.activeBattleFamilyId === familyId);
+    let activeContextCount = 0;
+    let continuingBattle = false;
+    let positionValue = 0;
+    for (const context of contexts) {
+      if (battleProgram(program, context)) {
+        activeContextCount++;
+        if (context.state.activeBattleFamilyNumericId ===
+            evaluation.familyNumericId)
+          continuingBattle = true;
+      } else {
+        positionValue += context.positionValueSeconds;
+      }
+    }
+    evaluation.positionValueSeconds = positionValue;
     evaluation.attemptLossSeconds =
-      activeContexts.length > 0 && !continuingBattle
+      activeContextCount > 0 && !continuingBattle
         ? measuredAttackTransitionLossSeconds()
         : 0;
-    evaluation.battleSpendSeconds = activeContexts.length > 0
+    evaluation.battleSpendSeconds = activeContextCount > 0
       ? battleSpendSeconds({
           measuredAttemptLossSeconds: evaluation.attemptLossSeconds,
           contestSeconds: evaluation.recourseSeconds,
@@ -5472,15 +6132,11 @@ function incumbentProgram(
   entry: Entry,
   programs: readonly CandidateProgram[]
 ): CandidateProgram | null {
-  const selectedFamilyId =
-    entry.racecraftDecision?.certificate?.selectedFamilyId;
+  const selectedFamilyNumericId =
+    entry.racecraftDecision?.certificate?.selectedFamilyNumericId;
   return programs.find(program =>
-    selectedFamilyId != null &&
-    racecraftStableFamilyId(
-      program.evaluation.kind,
-      program.evaluation.plan,
-      program.evaluation.slowPointOwnerCode
-    ) === selectedFamilyId) ??
+    selectedFamilyNumericId != null &&
+    program.evaluation.familyNumericId === selectedFamilyNumericId) ??
     programs[0] ??
     null;
 }
@@ -5559,10 +6215,13 @@ function appendDecisionLog(
     laneProgramReason: entry.laneProgram.reason,
     laneProgramBinding: entry.laneProgram.binding,
     selectedKind: decision.selectedKind,
+    selectedPlanNumericId: decision.selectedPlanNumericId,
     selectedPlanKey: decision.selectedPlanKey,
     economics: decision.economics.map(value => ({ ...value })),
     candidates: decision.candidates.map(candidate => ({
       kind: candidate.kind,
+      planNumericId: candidate.planNumericId,
+      familyNumericId: candidate.familyNumericId,
       planKey: candidate.plan.key,
       stableFamilyId: racecraftStableFamilyId(
         candidate.kind,
@@ -5678,6 +6337,64 @@ interface RacecraftProgramSelection {
   economics: BattleEconomicsContext[];
 }
 
+function repriceHazardsWithEmergencyResponse(
+  session: Session,
+  entry: ActiveEntry,
+  programs: readonly CandidateProgram[],
+  hazards: readonly Hazard[],
+  normalProgramCount: number
+): void {
+  for (let programIndex = 0;
+    programIndex < normalProgramCount;
+    programIndex++) {
+    const program = programs[programIndex]!;
+    if (!program.evaluation.feasible ||
+        !program.emergencyHazards.size) continue;
+    const evaluation = program.evaluation;
+    for (const hazard of hazards) {
+      if (!program.emergencyHazards.has(hazard.key)) continue;
+      const stations = boundProgramHazard(session, program, hazard);
+      const clearance = stations
+        ? programHazardClearance(
+            session,
+            program,
+            hazard,
+            stations
+          )
+        : null;
+      const previous = program.perturbations.get(hazard.key);
+      const cost = evaluateHazard(
+        session,
+        entry,
+        program,
+        hazard,
+        hazards,
+        programs,
+        null,
+        stations,
+        clearance
+      );
+      const previousSeconds = previous?.base ?? 0;
+      if (previousSeconds === 0 && cost.seconds !== 0)
+        evaluation.hazardCount++;
+      else if (previousSeconds !== 0 && cost.seconds === 0)
+        evaluation.hazardCount--;
+      evaluation.billSeconds += cost.billSeconds -
+        (previous?.billSeconds ?? 0);
+      evaluation.recourseSeconds += cost.recourseSeconds -
+        (previous?.recourseSeconds ?? 0);
+      evaluation.cost += cost.seconds - previousSeconds;
+      program.perturbations.set(hazard.key, {
+        base: cost.seconds,
+        billSeconds: cost.billSeconds,
+        recourseSeconds: cost.recourseSeconds,
+        bindingStationIndex: cost.bindingStationIndex
+      });
+    }
+    program.emergencyHazards.clear();
+  }
+}
+
 function appendSlackGatedEmergencyProgram(
   session: Session,
   entry: ActiveEntry,
@@ -5689,40 +6406,50 @@ function appendSlackGatedEmergencyProgram(
 ): void {
   const expiringKeys = new Set<string>();
   for (const program of programs) {
-    if (!program.evaluation.feasible) continue;
-    for (const hazard of hazards)
-      evaluateHazard(
-        session,
-        entry,
-        program,
-        hazard,
-        hazards,
-        programs
-      );
     for (const key of program.emergencyHazards.keys())
       expiringKeys.add(key);
-    program.emergencyHazards.clear();
   }
   if (!expiringKeys.size) return;
   if (programs.length >= MAX_RACECRAFT_CANDIDATES)
     throw new Error('Slack-gated emergency has no maneuver slot');
-  const expiringHazards = hazards.filter(hazard =>
-    expiringKeys.has(hazard.key));
+  const expiringHazards: Hazard[] = [];
+  for (const hazard of hazards)
+    if (expiringKeys.has(hazard.key))
+      expiringHazards.push(hazard);
   const seed = jointEmergencyEscapeSeed(
     session,
     entry,
     expiringHazards
   );
-  if (!seed) return;
+  if (!seed) {
+    for (const program of programs) program.emergencyHazards.clear();
+    return;
+  }
+  const normalProgramCount = programs.length;
   evaluatorWork(session).candidateSeedsBuilt++;
-  programs.push(evaluateSeed(
+  const emergency = evaluateSeed(
     session,
     entry,
     entries,
     seed,
     previousKind,
     evaluationClaims
-  ));
+  );
+  programs.push(emergency);
+  repriceHazardsWithEmergencyResponse(
+    session,
+    entry,
+    programs,
+    hazards,
+    normalProgramCount
+  );
+  scorePrograms(
+    session,
+    entry,
+    [emergency],
+    hazards,
+    programs
+  );
 }
 
 function selectRacecraftProgram(
@@ -5735,8 +6462,12 @@ function selectRacecraftProgram(
   const active = entry as ActiveEntry;
   const evaluationClaims = evaluationClaimsAt(session, entries);
   const previousKind = entry.racecraftDecision?.selectedKind ?? null;
-  const hasInteractionNeighbor = entries.some(other =>
-    racecraftIsInteractionNeighbor(session, active, other));
+  let hasInteractionNeighbor = false;
+  for (const other of entries)
+    if (racecraftIsInteractionNeighbor(session, active, other)) {
+      hasInteractionNeighbor = true;
+      break;
+    }
   if (!hasInteractionNeighbor &&
       racecraftLateralAuthoritySettledOnIdeal(session, active)) {
     reconcileBattleOpportunityObservations(session, active, []);
@@ -5760,18 +6491,23 @@ function selectRacecraftProgram(
     evaluationClaims,
     false
   );
-  const programs = seeds.map(seed =>
-    evaluateSeed(
+  const programs = new Array<CandidateProgram>(seeds.length);
+  for (let index = 0; index < seeds.length; index++)
+    programs[index] = evaluateSeed(
       session,
       active,
       entries,
-      seed,
+      seeds[index]!,
       previousKind,
       evaluationClaims
-    ));
+    );
   const leader = activeLeader(session, active, entries);
-  const hold = programs.find(program =>
-    program.evaluation.kind === 'hold');
+  let hold: CandidateProgram | undefined;
+  for (const program of programs)
+    if (program.evaluation.kind === 'hold') {
+      hold = program;
+      break;
+    }
   if (leader && hold && programs.length < MAX_RACECRAFT_CANDIDATES) {
     const brakeSeed = brakeBehindSeed(session, active, leader.entry);
     const brakeSpeedLaw = composeCandidateSpeedLaw(
@@ -5796,6 +6532,7 @@ function selectRacecraftProgram(
       ));
     }
   }
+  scorePrograms(session, active, programs, hazards);
   appendSlackGatedEmergencyProgram(
     session,
     active,
@@ -5812,11 +6549,14 @@ function selectRacecraftProgram(
       `Racecraft full evaluation budget exceeded: ` +
       `${fullSeedEvaluations}/${MAX_RACECRAFT_CANDIDATES}`
     );
-  scorePrograms(session, active, programs, hazards);
   const economics: BattleEconomicsContext[] = [];
-  const leaderHazard = leader
-    ? hazards.find(hazard => hazard.other === leader.entry)
-    : null;
+  let leaderHazard: Hazard | null = null;
+  if (leader)
+    for (const hazard of hazards)
+      if (hazard.other === leader.entry) {
+        leaderHazard = hazard;
+        break;
+      }
   if (leader && leaderHazard)
     economics.push(updateBattleEconomicsContext(
       session,
@@ -5827,9 +6567,13 @@ function selectRacecraftProgram(
       'attack'
     ));
   const attacker = activeDefensiveAttacker(session, active, entries);
-  const attackerHazard = attacker
-    ? hazards.find(hazard => hazard.other === attacker.entry)
-    : null;
+  let attackerHazard: Hazard | null = null;
+  if (attacker)
+    for (const hazard of hazards)
+      if (hazard.other === attacker.entry) {
+        attackerHazard = hazard;
+        break;
+      }
   if (attacker && attackerHazard)
     economics.push(updateBattleEconomicsContext(
       session,
@@ -5842,11 +6586,12 @@ function selectRacecraftProgram(
   reconcileBattleOpportunityObservations(session, active, economics);
   applyBattleEconomics(programs, economics);
   const incumbent = incumbentProgram(entry, programs);
-  let best = programs
-    .filter(program => program.evaluation.feasible)
-    .sort((left, right) =>
-      left.evaluation.cost - right.evaluation.cost)[0] ??
-    null;
+  let best: CandidateProgram | null = null;
+  for (const program of programs)
+    if (program.evaluation.feasible &&
+        (best == null ||
+          program.evaluation.cost < best.evaluation.cost))
+      best = program;
   if (best && incumbent?.evaluation.feasible && best !== incumbent) {
     const beta = tieBand(
       session,
@@ -6110,6 +6855,7 @@ export function makeRacecraftSettledSolitudeDecision(
   return {
     at: session.t,
     selectedKind: 'ideal',
+    selectedPlanNumericId: null,
     selectedPlanKey: null,
     candidateCount: 0,
     targetLateral: session.trk.idealPath.off[index]!,
@@ -6121,6 +6867,7 @@ export function makeRacecraftSettledSolitudeDecision(
       session,
       entry,
       [],
+      null,
       null,
       true
     ),
@@ -6181,7 +6928,12 @@ export function racecraftCurrentGripUtilization(
     : clamp(entry.inp.throttle, 0, 1) *
       Math.min(PHYS.Fmax, PHYS.power / Math.max(entry.spd, 4)) /
         PHYS.m / grip;
-  return clamp(Math.hypot(lateral, Math.max(braking, drive)), 0, 1);
+  const longitudinal = Math.max(braking, drive);
+  return clamp(
+    Math.sqrt(lateral * lateral + longitudinal * longitudinal),
+    0,
+    1
+  );
 }
 
 /** One bounded argmin in seconds, evaluated against the immutable snapshot. */
@@ -6231,9 +6983,12 @@ export function evaluateRacecraftDecision(
         best.evaluation.slowPointOwnerCode
       )
     : null;
+  const selectedFamilyNumericId =
+    best?.evaluation.familyNumericId ?? null;
   const decision: RacecraftDecision = {
     at: session.t,
     selectedKind: best?.evaluation.kind ?? null,
+    selectedPlanNumericId: best?.evaluation.planNumericId ?? null,
     selectedPlanKey: best?.evaluation.plan.key ?? null,
     candidateCount: candidates.length,
     targetLateral: best?.evaluation.targetLateral ?? entry.latNow,
@@ -6261,6 +7016,7 @@ export function evaluateRacecraftDecision(
       session,
       active,
       neighbors,
+      selectedFamilyNumericId,
       selectedFamilyId,
       false
     ),
@@ -6280,7 +7036,8 @@ export function evaluateRacecraftDecision(
   const frozenHazards: Hazard[] = selection.hazards.map(hazard => {
     const frozen: Hazard = {
       ...hazard,
-      other: frozenByCode.get(hazard.other.code)!
+      other: frozenByCode.get(hazard.other.code)!,
+      rivalSweepGeometry: null
     };
     if (hazard.bestPlanContinuation)
       frozen.bestPlanContinuation = {
@@ -6296,9 +7053,7 @@ export function evaluateRacecraftDecision(
         evaluationClaims:
           new Map(hazard.bestPlanContinuation.evaluationClaims)
       };
-    else if (hazard.bestPlanContinuation === null)
-      frozen.bestPlanContinuation = null;
-    else delete frozen.bestPlanContinuation;
+    else frozen.bestPlanContinuation = null;
     return frozen;
   });
   standingDecisionEvaluations.set(decision, {
@@ -6337,7 +7092,8 @@ function hasLiveRacecraftInteraction(
     if (!targetCode || obligation.beneficiary.code === targetCode) return true;
   if (hasSideAgreement(session, entry.code)) return true;
   const selected = entry.racecraftDecision?.candidates.find(candidate =>
-    candidate.plan.key === entry.racecraftDecision?.selectedPlanKey);
+    candidate.planNumericId ===
+      entry.racecraftDecision?.selectedPlanNumericId);
   if (!selected || selected.plan.mode === 'ideal' ||
       selected.plan.mode === 'pit') return false;
   const leaderCode = selected.slowPointOwnerCode ?? selected.plan.leaderCode;

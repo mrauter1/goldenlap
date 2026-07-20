@@ -9,6 +9,11 @@ export interface MeasuredContactGrindLossPoint {
   readonly additionalSecondsLost: number;
 }
 
+export interface MeasuredContactEpisodeLossBound {
+  readonly lowerBoundSeconds: number;
+  readonly exact: boolean;
+}
+
 export const MEASURED_CONTACT_LOSS_PROVENANCE = Object.freeze({
   schemaVersion: 2 as const,
   method: "stable-car lateral strike versus identical no-contact control",
@@ -144,7 +149,7 @@ export const MEASURED_CONTACT_GRIND_LOSS_PROVENANCE = Object.freeze({
   referenceSpeedMetresPerSecond: 47.0400463163761,
   pressureRelativeNormalSpeedMetresPerSecond: 1.7951962222222224,
   durationStepSeconds: 0.1,
-  maximumDurationSeconds: 2.4,
+  maximumDurationSeconds: 4.8,
   contactLateralSeparationMetres: 1.5,
   baselineSingleStrikeLossSeconds: 0.005054059579047088
 });
@@ -182,7 +187,31 @@ readonly MeasuredContactGrindLossPoint[] = Object.freeze([
   { durationSeconds: 2.1, additionalSecondsLost: 0.36995540162640356 },
   { durationSeconds: 2.2, additionalSecondsLost: 0.4044391568486166 },
   { durationSeconds: 2.3000000000000003, additionalSecondsLost: 0.44802168593231323 },
-  { durationSeconds: 2.4000000000000004, additionalSecondsLost: 0.4758220124795803 }
+  { durationSeconds: 2.4000000000000004, additionalSecondsLost: 0.4758220124795803 },
+  { durationSeconds: 2.5, additionalSecondsLost: 0.5151867961543595 },
+  { durationSeconds: 2.6, additionalSecondsLost: 0.5826999513014826 },
+  { durationSeconds: 2.7, additionalSecondsLost: 0.6253299647602051 },
+  { durationSeconds: 2.8000000000000003, additionalSecondsLost: 0.6695834321408161 },
+  { durationSeconds: 2.9000000000000004, additionalSecondsLost: 0.7614415813974402 },
+  { durationSeconds: 3, additionalSecondsLost: 0.8086221333499128 },
+  { durationSeconds: 3.1, additionalSecondsLost: 0.855977112257367 },
+  { durationSeconds: 3.2, additionalSecondsLost: 0.9562405503301259 },
+  { durationSeconds: 3.3000000000000003, additionalSecondsLost: 1.0067835882146758 },
+  { durationSeconds: 3.4000000000000004, additionalSecondsLost: 1.0578315850751048 },
+  { durationSeconds: 3.5, additionalSecondsLost: 1.1068827120174556 },
+  { durationSeconds: 3.6, additionalSecondsLost: 1.1588996508930494 },
+  { durationSeconds: 3.7, additionalSecondsLost: 1.2673831191577876 },
+  { durationSeconds: 3.8000000000000003, additionalSecondsLost: 1.320996040149198 },
+  { durationSeconds: 3.9000000000000004, additionalSecondsLost: 1.3750510059681649 },
+  { durationSeconds: 4, additionalSecondsLost: 1.4262560601304248 },
+  { durationSeconds: 4.1000000000000005, additionalSecondsLost: 1.481025991762716 },
+  { durationSeconds: 4.2, additionalSecondsLost: 1.5952750597246388 },
+  { durationSeconds: 4.3, additionalSecondsLost: 1.6512364178911996 },
+  { durationSeconds: 4.4, additionalSecondsLost: 1.707523965825559 },
+  { durationSeconds: 4.5, additionalSecondsLost: 1.760299239389943 },
+  { durationSeconds: 4.6000000000000005, additionalSecondsLost: 1.8171204473152598 },
+  { durationSeconds: 4.7, additionalSecondsLost: 1.9356180532717786 },
+  { durationSeconds: 4.800000000000001, additionalSecondsLost: 1.9933019772635536 }
 ]);
 
 type MeasuredContactField = 'recoverySeconds' | 'secondsLost';
@@ -257,7 +286,8 @@ export function measuredContactGrindLossSeconds(
     Number.EPSILON * Math.max(1, maximum) * 8;
   if (durationSeconds > maximum + numericalTolerance)
     throw new RangeError(
-      'durationSeconds exceeds the measured sustained-contact curve'
+      `durationSeconds ${durationSeconds} exceeds the measured ` +
+      `sustained-contact curve maximum ${maximum}`
     );
   const measuredDurationSeconds = Math.min(durationSeconds, maximum);
 
@@ -298,5 +328,33 @@ export function measuredContactEpisodeLossSeconds(
       episode.initialRelativeNormalSpeed
     ) + measuredContactGrindLossSeconds(episode.durationSeconds);
   return total;
+}
+
+/**
+ * A covered prefix of sustained contact is a lower bound on the loss from
+ * remaining in the same contact episode. This lets the evaluator prove that
+ * a separation response wins without extrapolating the measured curve.
+ */
+export function measuredContactEpisodeLossBound(
+  episodes: readonly Pick<
+    SweptCarContactEpisode,
+    'initialRelativeNormalSpeed' | 'durationSeconds'
+  >[]
+): MeasuredContactEpisodeLossBound {
+  const maximumDuration = MEASURED_CONTACT_GRIND_LOSS.at(-1)!
+    .durationSeconds;
+  let lowerBoundSeconds = 0;
+  let exact = true;
+  for (const episode of episodes) {
+    const coveredDuration = Math.min(
+      episode.durationSeconds,
+      maximumDuration
+    );
+    lowerBoundSeconds += measuredContactLossSeconds(
+      episode.initialRelativeNormalSpeed
+    ) + measuredContactGrindLossSeconds(coveredDuration);
+    if (episode.durationSeconds > maximumDuration) exact = false;
+  }
+  return { lowerBoundSeconds, exact };
 }
 import type { SweptCarContactEpisode } from '../../core/collision';

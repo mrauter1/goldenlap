@@ -457,10 +457,9 @@ describe('lane program authority', () => {
     const secondClaim = session.racecraftClaims!.get(second.code)!;
     expect(firstClaim.trusted).toBe(true);
     expect(secondClaim.trusted).toBe(true);
-    for (const claim of [firstClaim, secondClaim]) {
-      for (const station of claim.stations)
-        expect(station.speed).toBeGreaterThanOrEqual(0);
-    }
+    for (const claim of [firstClaim, secondClaim])
+      for (let index = 0; index < claim.stations.length; index++)
+        expect(claim.stations.v[index]).toBeGreaterThanOrEqual(0);
     expect(session.sideAgreements?.size).toBe(1);
     const firstBias = first.laneProgram.bias;
     const secondBias = second.laneProgram.bias;
@@ -582,7 +581,7 @@ describe('lane program authority', () => {
     );
     publishAllClaims(session);
     const freeSpeed =
-      session.racecraftClaims!.get(constrained.code)!.stations[0]!.speed;
+      session.racecraftClaims!.get(constrained.code)!.stations.v[0]!;
 
     constrained.racecraftLongitudinalProgram = {
       progress: freeProgramSpeed.map((_, slot) =>
@@ -606,17 +605,17 @@ describe('lane program authority', () => {
     publishAllClaims(session);
     const constrainedClaim =
       session.racecraftClaims!.get(constrained.code)!;
-    expect(constrainedClaim.stations[0]!.speed)
+    expect(constrainedClaim.stations.v[0])
       .toBeLessThan(freeSpeed);
-    expect(constrainedClaim.stations[0]!.speed)
+    expect(constrainedClaim.stations.v[0])
       .toBeLessThan(constrained.spd);
 
-    const dt = constrainedClaim.stations[0]!.time;
+    const dt = constrainedClaim.stations.time[0]!;
     const expectedAdvance = (
-      constrained.spd + constrainedClaim.stations[0]!.speed
+      constrained.spd + constrainedClaim.stations.v[0]!
     ) * 0.5 * dt;
     const actualAdvance = (
-      constrainedClaim.stations[0]!.s - constrainedClaim.originS +
+      constrainedClaim.stations.s[0]! - constrainedClaim.originS +
       built.tr.len
     ) % built.tr.len;
     expect(actualAdvance).toBeCloseTo(expectedAdvance, 11);

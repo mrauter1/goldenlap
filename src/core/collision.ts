@@ -80,7 +80,9 @@ export function carBodyCircleClearance(
         egoForwardLateral * egoOffset;
       clearance = Math.min(
         clearance,
-        Math.hypot(longitudinal, lateral) - contactRadius
+        Math.sqrt(
+          longitudinal * longitudinal + lateral * lateral
+        ) - contactRadius
       );
     }
   }
@@ -144,7 +146,10 @@ export function sweptCarMinimumClearance(
       const closestLateral =
         originLateral + deltaLateral * closestFraction;
       const candidateClearance =
-        Math.hypot(closestLongitudinal, closestLateral) - contactRadius;
+        Math.sqrt(
+          closestLongitudinal * closestLongitudinal +
+          closestLateral * closestLateral
+        ) - contactRadius;
       if (candidateClearance < clearanceMetres) {
         clearanceMetres = candidateClearance;
         fraction = closestFraction;
@@ -225,7 +230,10 @@ export function sweptCarContactIntervals(
         originLateral + deltaLateral * enter;
       const magnitude = Math.max(
         Number.EPSILON,
-        Math.hypot(contactLongitudinal, contactLateral)
+        Math.sqrt(
+          contactLongitudinal * contactLongitudinal +
+          contactLateral * contactLateral
+        )
       );
       raw.push({
         enterFraction: enter,
@@ -365,7 +373,7 @@ export function collideCars(list: readonly (Car | null | undefined)[], R?: numbe
           if (pen > bestPen){
             bestPen = pen;
             if (d2 < 1e-12){
-              const dl = Math.hypot(dx0, dy0) || 1;
+              const dl = Math.sqrt(dx0 * dx0 + dy0 * dy0) || 1;
               nx = dx0 / dl; ny = dy0 / dl;
             } else { nx = dx / d; ny = dy / d; }
           }
@@ -387,7 +395,9 @@ export function collideCars(list: readonly (Car | null | undefined)[], R?: numbe
         const e = 0.2, jimp = -(1 + e) * rel / 2;
         awx -= jimp * nx; awy -= jimp * ny;
         bwx += jimp * nx; bwy += jimp * ny;
-        const damp = 1 - 0.015 * (Math.abs(rel) / (Math.hypot(rvx, rvy) + 1e-6));
+        const relativeSpeed = Math.sqrt(rvx * rvx + rvy * rvy);
+        const damp = 1 -
+          0.015 * (Math.abs(rel) / (relativeSpeed + 1e-6));
         awx *= damp; awy *= damp; bwx *= damp; bwy *= damp;
         A.vx = awx * ca + awy * sa; A.vy = -awx * sa + awy * ca;
         B.vx = bwx * cb + bwy * sb; B.vy = -bwx * sb + bwy * cb;

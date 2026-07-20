@@ -128,7 +128,10 @@ export function racecraftFamilyGeometryAt(
   const longitudinalScale = 1 - baseCurvature * totalOffset;
   const q = Math.max(
     Number.EPSILON,
-    Math.hypot(longitudinalScale, lateralSlope)
+    Math.sqrt(
+      longitudinalScale * longitudinalScale +
+      lateralSlope * lateralSlope
+    )
   );
   const numerator = longitudinalScale * lateralSecond +
     baseCurvature * longitudinalScale * longitudinalScale +
