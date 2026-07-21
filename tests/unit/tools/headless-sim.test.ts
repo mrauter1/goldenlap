@@ -52,6 +52,32 @@ describe('production-backed headless simulation', () => {
     expect(summary.simulatedSeconds).toBe(1);
   });
 
+  test('threads the same predictive-safety inventory at 10 and 30 Hz', () => {
+    const ten = runFocusedSession(prado, {
+      scenario: 'pair',
+      simulatedSeconds: 1,
+      predictiveSafetyHz: 10,
+      seed: 17
+    });
+    const thirty = runFocusedSession(prado, {
+      scenario: 'pair',
+      simulatedSeconds: 1,
+      predictiveSafetyHz: 30,
+      seed: 17
+    });
+
+    expect(ten.metrics.predictiveSafetyHz).toBe(10);
+    expect(ten.metrics.predictiveSafetyIntervalTicks).toBe(3);
+    expect(thirty.metrics.predictiveSafetyHz).toBe(30);
+    expect(thirty.metrics.predictiveSafetyIntervalTicks).toBe(1);
+    expect(Object.keys(ten.diagnostics.racecraftSafetyPredicateRuns).sort())
+      .toEqual(
+        Object.keys(thirty.diagnostics.racecraftSafetyPredicateRuns).sort()
+      );
+    expect(thirty.metrics.racecraftSafetyPasses!)
+      .toBe(ten.metrics.racecraftSafetyPasses! * 3);
+  });
+
   test('observes bounded clearance across the physical braking zone', () => {
     const summary = runFocusedSession(prepareHeadlessTrack('anhembi'), {
       scenario: 'near-touch-tow',

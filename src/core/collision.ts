@@ -62,14 +62,14 @@ export function carBodyCircleClearance(
     2 * PHYS.colR2 - CAR_COLLISION_CONTACT_SLOP_METRES +
     Math.max(0, physicalMarginMetres);
   let clearance = Infinity;
-  for (const egoOffset of [
-    -CAR_COLLISION_AXLE_OFFSET_METRES,
-    CAR_COLLISION_AXLE_OFFSET_METRES
-  ]) {
-    for (const rivalOffset of [
-      -CAR_COLLISION_AXLE_OFFSET_METRES,
-      CAR_COLLISION_AXLE_OFFSET_METRES
-    ]) {
+  for (let egoIndex = 0; egoIndex < 2; egoIndex++) {
+    const egoOffset = egoIndex === 0
+      ? -CAR_COLLISION_AXLE_OFFSET_METRES
+      : CAR_COLLISION_AXLE_OFFSET_METRES;
+    for (let rivalIndex = 0; rivalIndex < 2; rivalIndex++) {
+      const rivalOffset = rivalIndex === 0
+        ? -CAR_COLLISION_AXLE_OFFSET_METRES
+        : CAR_COLLISION_AXLE_OFFSET_METRES;
       const longitudinal =
         relativeLongitudinal +
         rivalForwardLongitudinal * rivalOffset -
@@ -102,14 +102,10 @@ export function sweptCarMinimumClearance(
   rivalYaw: number,
   physicalMarginMetres = 0
 ): { clearanceMetres: number; fraction: number } {
-  const egoForward = {
-    longitudinal: Math.cos(egoYaw),
-    lateral: Math.sin(egoYaw)
-  };
-  const rivalForward = {
-    longitudinal: Math.cos(rivalYaw),
-    lateral: Math.sin(rivalYaw)
-  };
+  const egoForwardLongitudinal = Math.cos(egoYaw);
+  const egoForwardLateral = Math.sin(egoYaw);
+  const rivalForwardLongitudinal = Math.cos(rivalYaw);
+  const rivalForwardLateral = Math.sin(rivalYaw);
   const deltaLongitudinal = toLongitudinal - fromLongitudinal;
   const deltaLateral = toLateral - fromLateral;
   const quadratic = deltaLongitudinal * deltaLongitudinal +
@@ -119,22 +115,22 @@ export function sweptCarMinimumClearance(
     Math.max(0, physicalMarginMetres);
   let clearanceMetres = Infinity;
   let fraction = 0;
-  for (const egoOffset of [
-    -CAR_COLLISION_AXLE_OFFSET_METRES,
-    CAR_COLLISION_AXLE_OFFSET_METRES
-  ]) {
-    for (const rivalOffset of [
-      -CAR_COLLISION_AXLE_OFFSET_METRES,
-      CAR_COLLISION_AXLE_OFFSET_METRES
-    ]) {
+  for (let egoIndex = 0; egoIndex < 2; egoIndex++) {
+    const egoOffset = egoIndex === 0
+      ? -CAR_COLLISION_AXLE_OFFSET_METRES
+      : CAR_COLLISION_AXLE_OFFSET_METRES;
+    for (let rivalIndex = 0; rivalIndex < 2; rivalIndex++) {
+      const rivalOffset = rivalIndex === 0
+        ? -CAR_COLLISION_AXLE_OFFSET_METRES
+        : CAR_COLLISION_AXLE_OFFSET_METRES;
       const originLongitudinal =
         fromLongitudinal +
-        rivalForward.longitudinal * rivalOffset -
-        egoForward.longitudinal * egoOffset;
+        rivalForwardLongitudinal * rivalOffset -
+        egoForwardLongitudinal * egoOffset;
       const originLateral =
         fromLateral +
-        rivalForward.lateral * rivalOffset -
-        egoForward.lateral * egoOffset;
+        rivalForwardLateral * rivalOffset -
+        egoForwardLateral * egoOffset;
       const closestFraction = quadratic <= Number.EPSILON
         ? 0
         : clampUnit(-(
@@ -172,14 +168,10 @@ export function sweptCarContactIntervals(
   rivalYaw: number,
   physicalMarginMetres = 0
 ): SweptCarContactInterval[] {
-  const egoForward = {
-    longitudinal: Math.cos(egoYaw),
-    lateral: Math.sin(egoYaw)
-  };
-  const rivalForward = {
-    longitudinal: Math.cos(rivalYaw),
-    lateral: Math.sin(rivalYaw)
-  };
+  const egoForwardLongitudinal = Math.cos(egoYaw);
+  const egoForwardLateral = Math.sin(egoYaw);
+  const rivalForwardLongitudinal = Math.cos(rivalYaw);
+  const rivalForwardLateral = Math.sin(rivalYaw);
   const deltaLongitudinal = toLongitudinal - fromLongitudinal;
   const deltaLateral = toLateral - fromLateral;
   const quadratic = deltaLongitudinal * deltaLongitudinal +
@@ -188,22 +180,22 @@ export function sweptCarContactIntervals(
     2 * PHYS.colR2 - CAR_COLLISION_CONTACT_SLOP_METRES +
     Math.max(0, physicalMarginMetres);
   const raw: SweptCarContactInterval[] = [];
-  for (const egoOffset of [
-    -CAR_COLLISION_AXLE_OFFSET_METRES,
-    CAR_COLLISION_AXLE_OFFSET_METRES
-  ]) {
-    for (const rivalOffset of [
-      -CAR_COLLISION_AXLE_OFFSET_METRES,
-      CAR_COLLISION_AXLE_OFFSET_METRES
-    ]) {
+  for (let egoIndex = 0; egoIndex < 2; egoIndex++) {
+    const egoOffset = egoIndex === 0
+      ? -CAR_COLLISION_AXLE_OFFSET_METRES
+      : CAR_COLLISION_AXLE_OFFSET_METRES;
+    for (let rivalIndex = 0; rivalIndex < 2; rivalIndex++) {
+      const rivalOffset = rivalIndex === 0
+        ? -CAR_COLLISION_AXLE_OFFSET_METRES
+        : CAR_COLLISION_AXLE_OFFSET_METRES;
       const originLongitudinal =
         fromLongitudinal +
-        rivalForward.longitudinal * rivalOffset -
-        egoForward.longitudinal * egoOffset;
+        rivalForwardLongitudinal * rivalOffset -
+        egoForwardLongitudinal * egoOffset;
       const originLateral =
         fromLateral +
-        rivalForward.lateral * rivalOffset -
-        egoForward.lateral * egoOffset;
+        rivalForwardLateral * rivalOffset -
+        egoForwardLateral * egoOffset;
       const constant = originLongitudinal * originLongitudinal +
         originLateral * originLateral -
         contactRadius * contactRadius;
@@ -262,6 +254,34 @@ export function sweptCarContactIntervals(
   return merged;
 }
 
+function sweptCarCentresMayContact(
+  fromLongitudinal: number,
+  fromLateral: number,
+  toLongitudinal: number,
+  toLateral: number,
+  physicalMarginMetres: number
+): boolean {
+  const deltaLongitudinal = toLongitudinal - fromLongitudinal;
+  const deltaLateral = toLateral - fromLateral;
+  const quadratic = deltaLongitudinal * deltaLongitudinal +
+    deltaLateral * deltaLateral;
+  const fraction = quadratic <= Number.EPSILON
+    ? 0
+    : clampUnit(-(
+        fromLongitudinal * deltaLongitudinal +
+        fromLateral * deltaLateral
+      ) / quadratic);
+  const closestLongitudinal =
+    fromLongitudinal + deltaLongitudinal * fraction;
+  const closestLateral = fromLateral + deltaLateral * fraction;
+  const contactRadius =
+    2 * CAR_COLLISION_AXLE_OFFSET_METRES +
+    2 * PHYS.colR2 - CAR_COLLISION_CONTACT_SLOP_METRES +
+    Math.max(0, physicalMarginMetres);
+  return closestLongitudinal * closestLongitudinal +
+    closestLateral * closestLateral <= contactRadius * contactRadius;
+}
+
 /**
  * Connected contact episodes over a point-trajectory sweep.
  *
@@ -280,6 +300,13 @@ export function sweptCarContactEpisodes(
     const dt = to.timeSeconds - from.timeSeconds;
     if (!Number.isFinite(dt) || dt <= 0)
       throw new RangeError('swept pose times must be finite and increasing');
+    if (!sweptCarCentresMayContact(
+      from.relativeLongitudinal,
+      from.relativeLateral,
+      to.relativeLongitudinal,
+      to.relativeLateral,
+      physicalMarginMetres
+    )) continue;
     const midpointEgoHeading = normAng(
       from.egoHeadingRadians +
       normAng(to.egoHeadingRadians - from.egoHeadingRadians) / 2

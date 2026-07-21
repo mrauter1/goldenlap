@@ -148,7 +148,38 @@ export interface ManeuverPlanSampler<Context> {
   lateralAt(context: Context, index: number): number;
   curvatureAt:
     ((context: Context, index: number) => number) | null;
+  /**
+   * Optional owned physical sample. Analytic callers use it to avoid
+   * recomputing the same surface/grip state after geometry sampling.
+   */
+  writePhysicalSample?: (
+    context: Context,
+    index: number,
+    out: ManeuverPhysicalSample
+  ) => ManeuverPhysicalSample;
 }
+
+export interface ManeuverPhysicalSample {
+  lateral: number;
+  curvature: number;
+  capabilitySpeed: number;
+  dynamicMu: number;
+  road: number;
+  curb: number;
+  grass: number;
+  mu: number;
+}
+
+const maneuverPhysicalScratch: ManeuverPhysicalSample = {
+  lateral: 0,
+  curvature: 0,
+  capabilitySpeed: 0,
+  dynamicMu: 0,
+  road: 0,
+  curb: 0,
+  grass: 0,
+  mu: 0
+};
 
 interface GeometrySample {
   x: number;
@@ -329,10 +360,17 @@ export function evaluateManeuverPlanCompactWithSampler<Context>(
       1,
       Math.ceil(evaluatedDistance / track.step)
     );
+    const downforceScale = entryDownforceScale(entry);
     for (let sample = 0; sample <= surfaceSamples; sample++) {
       const distance = evaluatedDistance * sample / surfaceSamples;
       const index = indexAt(track, startS + distance);
-      const lateral = sampler.lateralAt(samplerContext, index);
+      const physical = sampler.writePhysicalSample?.(
+        samplerContext,
+        index,
+        maneuverPhysicalScratch
+      );
+      const lateral = physical?.lateral ??
+        sampler.lateralAt(samplerContext, index);
       if (!Number.isFinite(lateral)) {
         addRejection(diagnostic.rejections, 'non-finite');
         continue;
@@ -341,35 +379,37 @@ export function evaluateManeuverPlanCompactWithSampler<Context>(
         addRejection(diagnostic.rejections, 'road-bound');
       const exposure = plan.mode === 'pit'
         ? PIT_SURFACE_EXPOSURE
-        : surfaceExposureAtLateral(track, index, lateral);
+        : physical ?? surfaceExposureAtLateral(track, index, lateral);
       diagnostic.roadExposure += exposure.road;
       diagnostic.curbExposure += exposure.curb;
       diagnostic.grassExposure += exposure.grass;
-      const curvature = Math.abs(
+      const curvature = Math.abs(physical?.curvature ?? (
         sampler.curvatureAt
           ? sampler.curvatureAt(samplerContext, index)
           : geometryCurvatureAt(geometry, index)
-      );
+      ));
       const referenceSpeed = track.idealPath.v[index] ?? PHYS.vTop;
-      const dynamicMu = entryDynamicMuAt(
-        entry,
-        session,
-        referenceSpeed,
-        curvature
-      ) * exposure.mu;
-      const pathSpeed = Math.min(
-        referenceSpeed,
-        cornerSpeedForGrip(
-          curvature,
-          dynamicMu,
-          entryDownforceScale(entry)
-        )
-      );
+      const dynamicMu = physical?.dynamicMu ??
+        entryDynamicMuAt(
+          entry,
+          session,
+          referenceSpeed,
+          curvature
+        ) * exposure.mu;
+      const pathSpeed = physical?.capabilitySpeed ??
+        Math.min(
+          referenceSpeed,
+          cornerSpeedForGrip(
+            curvature,
+            dynamicMu,
+            downforceScale
+          )
+        );
       const lateralAcceleration = curvature * pathSpeed * pathSpeed;
       const available = availableDeceleration(
         pathSpeed,
         dynamicMu,
-        entryDownforceScale(entry)
+        downforceScale
       );
       diagnostic.controllerDemand = Math.max(
         diagnostic.controllerDemand,

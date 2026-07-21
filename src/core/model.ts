@@ -154,7 +154,10 @@ export interface SampledPath {
   complexId?: string | null;
 }
 
-/** Fixed local path span filled by the 30 Hz racecraft lane evaluator. */
+/**
+ * Fixed local samples for pit paths and non-tactical launch/recovery
+ * transitions. Directional tactical authority is never reconstructed here.
+ */
 export interface LaneSampleBuffer {
   startIndex: number;
   count: number;
@@ -186,6 +189,48 @@ export interface SpeedProfile {
   lapTime: number;
   step: number;
   ds: NumericArray | null;
+}
+
+/**
+ * Continuous piecewise-affine speed-squared authority over unwrapped
+ * progress. Every buffer is owned by this value; installed/public envelopes
+ * never alias construction scratch.
+ */
+export interface SpeedEnvelope {
+  readonly startProgress: number;
+  readonly endProgress: number;
+  readonly segmentCount: number;
+  readonly segmentStartProgress: NumericArray;
+  readonly segmentEndProgress: NumericArray;
+  readonly v2AtStart: NumericArray;
+  readonly slope: NumericArray;
+  /** Exact travel time from `startProgress` to each segment boundary. */
+  readonly prefixTravelSeconds: NumericArray;
+}
+
+/**
+ * Compact C2 lateral authority over unwrapped progress. Segment values are
+ * absolute offsets (`reference = 0`) or eta relative to the analytic ideal
+ * line (`reference = 1`).
+ */
+export interface CompactLateralProgram {
+  readonly startProgress: number;
+  readonly endProgress: number;
+  readonly segmentCount: number;
+  readonly originLateral: number;
+  readonly originFirstDerivative: number;
+  readonly originSecondDerivative: number;
+  readonly reference: Uint8Array;
+  readonly segmentStartProgress: NumericArray;
+  readonly segmentEndProgress: NumericArray;
+  readonly c0: NumericArray;
+  readonly c1: NumericArray;
+  readonly c2: NumericArray;
+  readonly c3: NumericArray;
+  readonly c4: NumericArray;
+  readonly c5: NumericArray;
+  readonly terminal: 'ideal' | 'ideal-relative';
+  readonly terminalEta: number;
 }
 
 export interface Track {
@@ -287,6 +332,14 @@ export interface BotParameters {
   vCap?: number;
   path?: SampledPath;
   lane?: LaneSampleBuffer;
+  /** Complete continuous speed authority; suppresses sampled horizon scans. */
+  speedEnvelope?: SpeedEnvelope;
+  /** Unwrapped progress at which the speed authority is consumed. */
+  speedProgress?: number;
+  /** Complete analytic lateral authority for a non-pit path. */
+  lateralProgram?: CompactLateralProgram;
+  /** Unwrapped progress at which the lateral authority is consumed. */
+  pathProgress?: number;
   pathTuning?: PathFollowerTuning;
 }
 

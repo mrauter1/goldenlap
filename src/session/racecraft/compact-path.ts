@@ -1,11 +1,30 @@
 import { sampleCornerLineEtaAnalytic } from '../../core/corner-lines';
-import type { Track } from '../../core/model';
-import type { PathPlan, PathPlanAnchor } from '../model';
+import {
+  sampleCompactLateralProgram,
+  sampleTrackIdealLateralAnalytic
+} from '../../core/lateral-program';
+import {
+  numericArray,
+  type Corner,
+  type CornerAlternateLineProfile,
+  type Track
+} from '../../core/model';
+import type {
+  PathPlan,
+  PathPlanAnchor,
+  RacecraftLateralProgram
+} from '../model';
 import {
   type CubicInterpolationSample,
   sampleQuinticHermiteSegment,
   sampleSmootherstepSegment
 } from './interpolation';
+
+export {
+  compactLateralPoseAtProgress,
+  sampleCompactLateralProgram,
+  sampleTrackIdealLateralAnalytic
+} from '../../core/lateral-program';
 
 interface CompactSamplingInterval {
   fromOffset: number;
@@ -28,6 +47,10 @@ interface CompactSamplingContext {
 const compactSamplingContexts = new WeakMap<
   PathPlan,
   { track: Track; context: CompactSamplingContext }
+>();
+const compactLateralPrograms = new WeakMap<
+  PathPlan,
+  { track: Track; program: RacecraftLateralProgram }
 >();
 
 type AnchoredPathPlan = Exclude<PathPlan, { mode: 'ideal' }>;
@@ -195,8 +218,13 @@ function compileTacticalEtaKnots(
   anchors: readonly PathPlanAnchor[],
   distances: readonly number[]
 ): CubicInterpolationSample[] {
-  const ideals = anchors.map(anchor =>
-    idealOffsetSample(track, anchor.index));
+  const originProgress = anchors[0]!.s ??
+    cyclicIndex(track, anchors[0]!.index) * track.step;
+  const ideals = anchors.map((_, index) =>
+    sampleTrackIdealLateralAnalytic(
+      track,
+      originProgress + distances[index]!
+    ));
   const values = anchors.map(anchor => anchorEta(track, anchor));
   const offsets = anchors.map(anchor => anchor.offset);
   const last = anchors.length - 1;
@@ -453,9 +481,345 @@ function samplePreparedCompactPathPlanOffsetAnalytic(
   return ideal;
 }
 
+interface LateralSegmentRecord {
+  reference: 0 | 1;
+  startProgress: number;
+  endProgress: number;
+  c0: number;
+  c1: number;
+  c2: number;
+  c3: number;
+  c4: number;
+  c5: number;
+}
+
+function appendQuinticSegment(
+  output: LateralSegmentRecord[],
+  reference: 0 | 1,
+  startProgress: number,
+  endProgress: number,
+  from: CubicInterpolationSample,
+  to: CubicInterpolationSample
+): void {
+  const span = endProgress - startProgress;
+  if (!(span > Number.EPSILON)) return;
+  const a0 = from.value;
+  const a1 = from.firstDerivative * span;
+  const a2 = from.secondDerivative * span * span / 2;
+  const valueRemainder = to.value - a0 - a1 - a2;
+  const slopeRemainder = to.firstDerivative * span - a1 - 2 * a2;
+  const curvatureRemainder =
+    to.secondDerivative * span * span - 2 * a2;
+  const a3 =
+    10 * valueRemainder -
+    4 * slopeRemainder +
+    curvatureRemainder / 2;
+  const a4 =
+    -15 * valueRemainder +
+    7 * slopeRemainder -
+    curvatureRemainder;
+  const a5 =
+    6 * valueRemainder -
+    3 * slopeRemainder +
+    curvatureRemainder / 2;
+  output.push({
+    reference,
+    startProgress,
+    endProgress,
+    c0: a0,
+    c1: a1,
+    c2: a2,
+    c3: a3,
+    c4: a4,
+    c5: a5
+  });
+}
+
+function zeroDerivativeSample(value: number): CubicInterpolationSample {
+  return {
+    value,
+    firstDerivative: 0,
+    secondDerivative: 0
+  };
+}
+
+function lateralProgramFromRecords(
+  records: readonly LateralSegmentRecord[],
+  terminal: RacecraftLateralProgram['terminal'],
+  terminalEta: number,
+  origin: CubicInterpolationSample = zeroDerivativeSample(0)
+): RacecraftLateralProgram {
+  const count = records.length;
+  const reference = new Uint8Array(count);
+  const segmentStartProgress = numericArray(count);
+  const segmentEndProgress = numericArray(count);
+  const c0 = numericArray(count);
+  const c1 = numericArray(count);
+  const c2 = numericArray(count);
+  const c3 = numericArray(count);
+  const c4 = numericArray(count);
+  const c5 = numericArray(count);
+  for (let index = 0; index < count; index++) {
+    const segment = records[index]!;
+    reference[index] = segment.reference;
+    segmentStartProgress[index] = segment.startProgress;
+    segmentEndProgress[index] = segment.endProgress;
+    c0[index] = segment.c0;
+    c1[index] = segment.c1;
+    c2[index] = segment.c2;
+    c3[index] = segment.c3;
+    c4[index] = segment.c4;
+    c5[index] = segment.c5;
+  }
+  return {
+    startProgress: records[0]?.startProgress ?? 0,
+    endProgress: records.at(-1)?.endProgress ?? 0,
+    segmentCount: count,
+    originLateral: origin.value,
+    originFirstDerivative: origin.firstDerivative,
+    originSecondDerivative: origin.secondDerivative,
+    reference,
+    segmentStartProgress,
+    segmentEndProgress,
+    c0,
+    c1,
+    c2,
+    c3,
+    c4,
+    c5,
+    terminal,
+    terminalEta
+  };
+}
+
+function absoluteFirstSample(
+  track: Track,
+  first: PathPlanAnchor,
+  firstProgress: number
+): CubicInterpolationSample {
+  const ideal = sampleTrackIdealLateralAnalytic(track, firstProgress);
+  return {
+    value: first.offset,
+    firstDerivative: Number.isFinite(first.etaFirstDerivative)
+      ? ideal.firstDerivative + first.etaFirstDerivative!
+      : 0,
+    secondDerivative: Number.isFinite(first.etaSecondDerivative)
+      ? ideal.secondDerivative + first.etaSecondDerivative!
+      : 0
+  };
+}
+
+function scaledCornerEtaSample(
+  track: Track,
+  corner: Corner,
+  line: CornerAlternateLineProfile,
+  progress: number,
+  blend: number
+): CubicInterpolationSample {
+  const sample = sampleCornerLineEtaAnalytic(
+    track,
+    corner,
+    line,
+    wrappedTrackS(track, progress) / track.step
+  );
+  return {
+    value: blend * sample.eta,
+    firstDerivative: blend * sample.firstDerivative,
+    secondDerivative: blend * sample.secondDerivative
+  };
+}
+
 /**
- * Sample the compact geometry authority directly. Derivatives are exact for
- * its C2 acquisition/transition and cached analytic G2 corner member.
+ * Compile one selected family into owned polynomial segments. The shared
+ * ideal line remains a separate analytic base, so tactical authority stays
+ * compact even across a long corner.
+ */
+export function compileCompactLateralProgram(
+  track: Track,
+  plan: Exclude<PathPlan, { mode: 'pit' }>
+): RacecraftLateralProgram {
+  const cached = compactLateralPrograms.get(plan);
+  if (cached?.track === track) return cached.program;
+  if (plan.mode === 'ideal') {
+    const program = lateralProgramFromRecords([], 'ideal', 0);
+    compactLateralPrograms.set(plan, { track, program });
+    return program;
+  }
+
+  const context = prepareCompactSampling(track, plan);
+  const first = context.first!;
+  const firstProgress = first.s ??
+    cyclicIndex(track, first.index) * track.step;
+  const records: LateralSegmentRecord[] = [];
+  let terminal: RacecraftLateralProgram['terminal'] = 'ideal';
+  let terminalEta = 0;
+  const origin = absoluteFirstSample(track, first, firstProgress);
+
+  if (plan.cornerId && plan.lineKind) {
+    const corner = track.corners?.find(value => value.id === plan.cornerId);
+    const family = corner?.alternateLines?.[plan.lineKind];
+    const line = family?.[
+      plan.lineTerminal === 'sustained-offset'
+        ? 'sustainedOffset'
+        : 'idealRejoin'
+    ];
+    const acquisition = plan.anchors[1];
+    if (corner && line && acquisition) {
+      const blend = plan.lineBlend ?? 1;
+      const acquisitionDistance = context.anchorDistances[1]!;
+      const acquisitionProgress = firstProgress + acquisitionDistance;
+      const acquisitionEta = scaledCornerEtaSample(
+        track,
+        corner,
+        line,
+        acquisitionProgress,
+        blend
+      );
+      const acquisitionIdeal =
+        sampleTrackIdealLateralAnalytic(track, acquisitionProgress);
+      appendQuinticSegment(
+        records,
+        0,
+        firstProgress,
+        acquisitionProgress,
+        origin,
+        {
+          value: acquisitionIdeal.value + acquisitionEta.value,
+          firstDerivative:
+            acquisitionIdeal.firstDerivative +
+            acquisitionEta.firstDerivative,
+          secondDerivative:
+            acquisitionIdeal.secondDerivative +
+            acquisitionEta.secondDerivative
+        }
+      );
+
+      const exitDistance = authoredDistanceForIndex(
+        track,
+        plan,
+        context,
+        corner.exitI
+      );
+      const boundaryDistances = [acquisitionDistance];
+      for (const point of line.points) {
+        const distance = authoredDistanceForIndex(
+          track,
+          plan,
+          context,
+          point.index
+        );
+        if (distance > acquisitionDistance + Number.EPSILON &&
+            distance <= exitDistance + Number.EPSILON)
+          boundaryDistances.push(distance);
+      }
+      if (boundaryDistances.at(-1)! <
+          exitDistance - Number.EPSILON)
+        boundaryDistances.push(exitDistance);
+      boundaryDistances.sort((left, right) => left - right);
+      let uniqueCount = 1;
+      for (let index = 1; index < boundaryDistances.length; index++) {
+        if (Math.abs(
+          boundaryDistances[index]! -
+          boundaryDistances[uniqueCount - 1]!
+        ) <= Number.EPSILON) continue;
+        boundaryDistances[uniqueCount++] = boundaryDistances[index]!;
+      }
+      boundaryDistances.length = uniqueCount;
+      for (let index = 0; index < boundaryDistances.length - 1; index++) {
+        const fromProgress = firstProgress + boundaryDistances[index]!;
+        const toProgress = firstProgress + boundaryDistances[index + 1]!;
+        appendQuinticSegment(
+          records,
+          1,
+          fromProgress,
+          toProgress,
+          scaledCornerEtaSample(
+            track,
+            corner,
+            line,
+            fromProgress,
+            blend
+          ),
+          scaledCornerEtaSample(
+            track,
+            corner,
+            line,
+            toProgress,
+            blend
+          )
+        );
+      }
+      if (line.terminal === 'sustained-offset') {
+        terminal = 'ideal-relative';
+        terminalEta = blend * line.points.at(-1)!.eta;
+      }
+    }
+  }
+
+  if (records.length === 0) {
+    for (const interval of context.intervals) {
+      const start = firstProgress + interval.fromDistance;
+      const end = firstProgress + interval.toDistance;
+      if (interval.fromEta && interval.toEta)
+        appendQuinticSegment(
+          records,
+          1,
+          start,
+          end,
+          interval.fromEta,
+          interval.toEta
+        );
+      else
+        appendQuinticSegment(
+          records,
+          0,
+          start,
+          end,
+          zeroDerivativeSample(interval.fromOffset),
+          zeroDerivativeSample(interval.toOffset)
+        );
+    }
+  }
+
+  const program = lateralProgramFromRecords(
+    records,
+    terminal,
+    terminalEta,
+    origin
+  );
+  compactLateralPrograms.set(plan, { track, program });
+  return program;
+}
+
+export function cloneCompactLateralProgram(
+  program: RacecraftLateralProgram
+): RacecraftLateralProgram {
+  const clone = <T extends Float64Array | Uint8Array>(value: T): T =>
+    value.slice() as T;
+  return {
+    startProgress: program.startProgress,
+    endProgress: program.endProgress,
+    segmentCount: program.segmentCount,
+    originLateral: program.originLateral,
+    originFirstDerivative: program.originFirstDerivative,
+    originSecondDerivative: program.originSecondDerivative,
+    reference: clone(program.reference),
+    segmentStartProgress: clone(program.segmentStartProgress),
+    segmentEndProgress: clone(program.segmentEndProgress),
+    c0: clone(program.c0),
+    c1: clone(program.c1),
+    c2: clone(program.c2),
+    c3: clone(program.c3),
+    c4: clone(program.c4),
+    c5: clone(program.c5),
+    terminal: program.terminal,
+    terminalEta: program.terminalEta
+  };
+}
+
+/**
+ * Sample the compact geometry authority directly. Tactical plans compile once
+ * into owned polynomial segments; pit retains its sampled full-path source.
  */
 export function sampleCompactPathPlanOffsetAnalytic(
   track: Track,
@@ -463,13 +827,22 @@ export function sampleCompactPathPlanOffsetAnalytic(
   sampleIndex: number,
   sampleProgress?: number
 ): CubicInterpolationSample {
-  const context = prepareCompactSampling(track, plan);
-  return samplePreparedCompactPathPlanOffsetAnalytic(
+  if (plan.mode === 'pit') {
+    const context = prepareCompactSampling(track, plan);
+    return samplePreparedCompactPathPlanOffsetAnalytic(
+      track,
+      plan,
+      sampleIndex,
+      context,
+      sampleProgress
+    );
+  }
+  const progress = sampleProgress ??
+    cyclicIndex(track, sampleIndex) * track.step;
+  return sampleCompactLateralProgram(
     track,
-    plan,
-    sampleIndex,
-    context,
-    sampleProgress
+    compileCompactLateralProgram(track, plan),
+    progress
   );
 }
 

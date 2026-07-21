@@ -2,6 +2,7 @@ import { clamp, lerp, normAng } from '../../shared/math';
 import { random } from '../../shared/rng';
 import { PATH_FOLLOWER_TUNING } from '../../core/autopilot';
 import { carBodyCircleClearance } from '../../core/collision';
+import { speedEnvelopesEqual } from '../../core/speed-envelope';
 import { nextCorner } from '../../core/racing-line';
 import {
   cornerSpeedForGrip,
@@ -22,12 +23,13 @@ import type {
   EntryTrafficSlowPoint,
   LegacyRoomPair,
   RacecraftDecision,
-  RacecraftDecisionCertificateBreakReason,
   RacecraftLongitudinalProgram,
+  RacecraftPublicationMode,
   Session,
   SideBySideEpisode,
   SideBySidePair
 } from '../model';
+import { RacecraftPendingDecisionReason } from '../model';
 import {
   alongside,
   hasSideAgreement,
@@ -40,7 +42,6 @@ import {
   syncPitPaths
 } from './paths';
 import {
-  OBSTACLE_NEIGHBOR_SCAN_METRES,
   racecraftCalibration,
   TRAFFIC_NEIGHBOR_SCAN_METRES
 } from './config';
@@ -52,15 +53,12 @@ import {
   installRacecraftPathPlan
 } from './lane-program';
 import {
-  publishRacecraftClaimSnapshot,
   updateRacecraftSideAgreements
 } from './corridor-planner';
 import {
   contractIsRevoked,
   isFixedOccupancy,
-  isObligationParticipant,
-  obligationGeometryForcesSingleFile,
-  obligationsFor
+  obligationGeometryForcesSingleFile
 } from './relations';
 import {
   observeRacecraftDecisions,
@@ -73,18 +71,32 @@ import {
 } from './utilization';
 import {
   evaluateRacecraftDecision,
-  makeRacecraftSettledSolitudeDecision,
   maintainRacingLineZeroState,
+  racecraftCapabilityPaceRatio,
   racecraftCurrentGripUtilization,
   racecraftCurrentLaneCurvature,
-  racecraftDefensiveAttacker,
-  racecraftDecisionCertificateBreakReason,
-  racecraftIsInteractionNeighbor,
-  racecraftLateralAuthoritySettledOnIdeal,
-  racecraftSelectedLaneIsExecutable,
-  renewPublishedEmergencyCertificate,
-  sealRacecraftDecisionCertificate
+  racecraftSelectedLaneIsExecutable
 } from './evaluator';
+import {
+  buildRacecraftPlanningContext,
+  buildRacecraftPlanningOrder,
+  racecraftDecisionSlotIsDue,
+  selectedCommittedDefenseView,
+  type RacecraftPlanningContext
+} from './planning-order';
+import {
+  classifyRacecraftOpportunity,
+  type RacecraftOpportunity
+} from './opportunity';
+import {
+  pruneRacecraftTacticalPublications,
+  publishRacecraftTacticalPublication
+} from './publication';
+import { runRacecraftPredictiveSafetyPass } from './reactive-safety';
+import {
+  recordRacecraftDeliberation,
+  recordRacecraftSameSlotReopening
+} from './diagnostics';
 
 type ActiveEntry = Entry & { car: Car };
 
@@ -198,15 +210,10 @@ function installRacecraftLongitudinalProgram(
   const previous = entry.racecraftLongitudinalProgram;
   const sameSpeedLaw = previous != null && program != null &&
     previous.brakingEffort === program.brakingEffort &&
-    previous.progress.length === program.progress.length &&
-    previous.speed.length === program.speed.length &&
-    previous.progress.every((value, index) =>
-      value === program.progress[index]) &&
-    previous.speed.every((value, index) =>
-      value === program.speed[index]);
+    speedEnvelopesEqual(previous.envelope, program.envelope);
   entry.racecraftLongitudinalProgram = program;
   // The generation names the executed speed law, not the rival that happened
-  // to induce it. Equal samples are the same authority; changed samples are
+  // to induce it. Equal envelopes are the same authority; a changed envelope is
   // new control even when their slow-point owner is unchanged.
   if (!sameSpeedLaw)
     entry._racecraftLongitudinalAuthorityRevision =
@@ -275,7 +282,16 @@ function applyQueueSlowPoint(
   );
 }
 
-function laneBufferCoverageRequiresRebuild(
+function forwardTrackDistance(
+  length: number,
+  from: number,
+  to: number
+): number {
+  const distance = to - from;
+  return distance < 0 ? distance + length : distance;
+}
+
+function transitionLaneBufferCoverageRequiresRebuild(
   session: Session,
   entry: Entry
 ): boolean {
@@ -292,180 +308,78 @@ function laneBufferCoverageRequiresRebuild(
     consumed + lookaheadSamples >= buffer.count;
 }
 
-function boundedInteractionNeighbors(
+function recordSingleFileTrainDiagnostics(
   session: Session,
-  entries: readonly ActiveEntry[],
-  entryIndex: number
-): ActiveEntry[] {
-  const entry = entries[entryIndex]!;
-  if (entries.length <= 1) return [];
-  const found: ActiveEntry[] = [];
-  for (let step = 1; step < entries.length; step++) {
-    const candidate = entries[(entryIndex + step) % entries.length]!;
+  entries: readonly ActiveEntry[]
+): void {
+  if (entries.length < 2) {
+    delete session._racecraftCurrentSingleFileTrainKey;
+    session._racecraftCurrentSingleFileTrainSeconds = 0;
+    return;
+  }
+  const links = entries.map((follower, index) => {
+    const leader = entries[(index + 1) % entries.length]!;
     const distance = forwardTrackDistance(
       session.trk.len,
-      entry.car.s,
-      candidate.car.s
+      follower.car.s,
+      leader.car.s
     );
-    if (distance > OBSTACLE_NEIGHBOR_SCAN_METRES) break;
-    appendInteractionNeighbor(session, entry, candidate, found);
-  }
-  for (let step = 1; step < entries.length; step++) {
-    const candidate = entries[
-      (entryIndex - step + entries.length) % entries.length
-    ]!;
-    const distance = forwardTrackDistance(
-      session.trk.len,
-      candidate.car.s,
-      entry.car.s
-    );
-    if (distance > OBSTACLE_NEIGHBOR_SCAN_METRES) break;
-    appendInteractionNeighbor(session, entry, candidate, found);
-  }
-  return found.sort(compareEntryCode);
-}
-
-interface RacecraftInteractionEpoch {
-  demandedCodes: Set<string>;
-  neighborsByCode: Map<string, ActiveEntry[]>;
-}
-
-function forwardTrackDistance(
-  length: number,
-  from: number,
-  to: number
-): number {
-  const distance = to - from;
-  return distance < 0 ? distance + length : distance;
-}
-
-function compareEntryCode(left: ActiveEntry, right: ActiveEntry): number {
-  return left.code.localeCompare(right.code);
-}
-
-function appendInteractionNeighbor(
-  session: Session,
-  entry: ActiveEntry,
-  candidate: ActiveEntry,
-  found: ActiveEntry[]
-): void {
-  for (const existing of found)
-    if (existing === candidate) return;
-  if (racecraftIsInteractionNeighbor(session, entry, candidate))
-    found.push(candidate);
-}
-
-function addEpochNeighbor(
-  neighbors: Map<string, Set<ActiveEntry>>,
-  entry: ActiveEntry,
-  other: ActiveEntry
-): void {
-  neighbors.get(entry.code)!.add(other);
-}
-
-function buildRacecraftInteractionEpoch(
-  session: Session,
-  entries: readonly ActiveEntry[],
-  activeByCode: ReadonlyMap<string, ActiveEntry>
-): RacecraftInteractionEpoch {
-  const demandedCodes = new Set<string>();
-  const neighborSets = new Map<string, Set<ActiveEntry>>();
-  for (const entry of entries)
-    neighborSets.set(entry.code, new Set<ActiveEntry>());
-  for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
-    const entry = entries[entryIndex]!;
-    for (const neighbor of boundedInteractionNeighbors(
-      session,
-      entries,
-      entryIndex
-    )) {
-      addEpochNeighbor(neighborSets, entry, neighbor);
-      demandedCodes.add(entry.code);
-      demandedCodes.add(neighbor.code);
+    const inline = follower.state === 'run' &&
+      leader.state === 'run' &&
+      distance <= TRAFFIC_NEIGHBOR_SCAN_METRES &&
+      Math.abs(follower.latNow - leader.latNow) <
+        PHYS.carWid - Number.EPSILON;
+    if (inline &&
+        follower.racecraftLongitudinalProgram
+          ?.slowPointOwnerCode === leader.code &&
+        racecraftCapabilityPaceRatio(session, follower) <
+          racecraftCapabilityPaceRatio(session, leader) -
+            Number.EPSILON)
+      session.racecraftFasterCarBlockedSeconds =
+        (session.racecraftFasterCarBlockedSeconds ?? 0) + TRAF_DT;
+    return inline;
+  });
+  let seam = links.findIndex(link => !link);
+  if (seam < 0) seam = entries.length - 1;
+  let currentStart = (seam + 1) % entries.length;
+  let currentLength = 1;
+  let bestStart = currentStart;
+  let bestLength = 1;
+  for (let step = 0; step < entries.length - 1; step++) {
+    const from = (seam + 1 + step) % entries.length;
+    const next = (from + 1) % entries.length;
+    if (links[from]) {
+      currentLength++;
+      if (currentLength > bestLength) {
+        bestStart = currentStart;
+        bestLength = currentLength;
+      }
+    } else {
+      currentStart = next;
+      currentLength = 1;
     }
   }
-  for (const entry of entries) {
-    const neighbors = [...neighborSets.get(entry.code)!];
-    for (const obligation of obligationsFor(
-      session,
-      entry,
-      [entry, ...neighbors]
-    )) {
-      demandedCodes.add(obligation.yielding.code);
-      demandedCodes.add(obligation.beneficiary.code);
-      addEpochNeighbor(
-        neighborSets,
-        obligation.yielding,
-        obligation.beneficiary
-      );
-      addEpochNeighbor(
-        neighborSets,
-        obligation.beneficiary,
-        obligation.yielding
-      );
-    }
+  if (bestLength < 2) {
+    delete session._racecraftCurrentSingleFileTrainKey;
+    session._racecraftCurrentSingleFileTrainSeconds = 0;
+    return;
   }
-  for (const key of session.sideAgreements?.keys() ?? []) {
-    const separator = key.indexOf(':');
-    const first = activeByCode.get(key.slice(0, separator));
-    const second = activeByCode.get(key.slice(separator + 1));
-    if (!first || !second) continue;
-    demandedCodes.add(first.code);
-    demandedCodes.add(second.code);
-    addEpochNeighbor(neighborSets, first, second);
-    addEpochNeighbor(neighborSets, second, first);
-  }
-  const neighborsByCode = new Map<string, ActiveEntry[]>();
-  for (const entry of entries)
-    neighborsByCode.set(
-      entry.code,
-      [...neighborSets.get(entry.code)!].sort((left, right) =>
-        left.code.localeCompare(right.code))
-    );
-  return { demandedCodes, neighborsByCode };
-}
-
-/** Exact external-prediction demand for one immutable arbitration epoch. */
-export function racecraftDemandedClaimCodes(
-  session: Session,
-  entries: readonly Entry[]
-): Set<string> {
-  const active: ActiveEntry[] = [];
-  for (const entry of entries)
-    if (entry.car &&
-      (entry.state === 'run' ||
-        entry.state === 'pitIn' ||
-        entry.state === 'pitOut'))
-      active.push(entry as ActiveEntry);
-  active.sort((left, right) =>
-    left.car.s - right.car.s || left.code.localeCompare(right.code));
-  const activeByCode = new Map<string, ActiveEntry>();
-  for (const entry of active) activeByCode.set(entry.code, entry);
-  return buildRacecraftInteractionEpoch(
-    session,
-    active,
-    activeByCode
-  ).demandedCodes;
-}
-
-function claimSnapshotMatchesDemand(
-  session: Session,
-  demandedCodes: ReadonlySet<string>
-): boolean {
-  const claims = session.racecraftClaims;
-  if (!claims || claims.size !== demandedCodes.size) return false;
-  for (const code of demandedCodes)
-    if (!claims.has(code)) return false;
-  return true;
-}
-
-function recordCertificateBreak(
-  session: Session,
-  reason: RacecraftDecisionCertificateBreakReason
-): void {
-  const counts = session.racecraftCertificateBreaks ??
-    (session.racecraftCertificateBreaks = {});
-  counts[reason] = (counts[reason] ?? 0) + 1;
+  let key = entries[bestStart]!.code;
+  for (let offset = 1; offset < bestLength; offset++)
+    key += `>${entries[(bestStart + offset) % entries.length]!.code}`;
+  const duration = session._racecraftCurrentSingleFileTrainKey === key
+    ? (session._racecraftCurrentSingleFileTrainSeconds ?? 0) + TRAF_DT
+    : TRAF_DT;
+  session._racecraftCurrentSingleFileTrainKey = key;
+  session._racecraftCurrentSingleFileTrainSeconds = duration;
+  session.racecraftMaximumSingleFileTrainLength = Math.max(
+    session.racecraftMaximumSingleFileTrainLength ?? 0,
+    bestLength
+  );
+  session.racecraftLongestSingleFileTrainSeconds = Math.max(
+    session.racecraftLongestSingleFileTrainSeconds ?? 0,
+    duration
+  );
 }
 
 export function unstableCar(tr: Track, e: Entry): boolean {
@@ -477,52 +391,185 @@ export function unstableCar(tr: Track, e: Entry): boolean {
   return Math.abs(normAng(e.car.h - roadH)) > 0.42;
 }
 
-/**
- * Claim the one permitted defensive response to one attack episode.
- *
- * Active attackers are tracked independently so an interleaved pack cannot
- * reset the one-move rule. Entries are removed when that attacker stops
- * targeting this defender.
- */
-export function claimDefenseResponse(defender: Entry, attacker: Entry): boolean {
-  const seen = defender._defSeenAttackers ??
-    (defender._defSeenAttackers = Object.create(null) as Record<string, boolean>);
-  if (seen[attacker.code]) return false;
-  seen[attacker.code] = true;
-  defender._defSeenKey = `${attacker.code}:active`;
-  return true;
+function directDecision(
+  session: Session,
+  entry: ActiveEntry,
+  opportunity: RacecraftOpportunity
+): RacecraftDecision {
+  const follow = opportunity.classification === 'direct-follow';
+  const proofKey = follow
+    ? `direct-follow:` +
+      `${opportunity.negativeSideCertificate?.reason ?? 'missing'}|` +
+      `${opportunity.positiveSideCertificate?.reason ?? 'missing'}`
+    : `direct-ideal:${opportunity.reason}`;
+  const proofs = session.racecraftDirectDecisionProofs ??
+    (session.racecraftDirectDecisionProofs =
+      Object.create(null) as Record<string, number>);
+  proofs[proofKey] = (proofs[proofKey] ?? 0) + 1;
+  if (follow) {
+    session.racecraftDirectFollowDecisions =
+      (session.racecraftDirectFollowDecisions ?? 0) + 1;
+    if (!opportunity.negativeSideCertificate ||
+        !opportunity.positiveSideCertificate)
+      session.racecraftDirectFollowWithoutCertificates =
+        (session.racecraftDirectFollowWithoutCertificates ?? 0) + 1;
+  } else {
+    session.racecraftDirectIdealDecisions =
+      (session.racecraftDirectIdealDecisions ?? 0) + 1;
+  }
+  const index = Math.max(0, entry.car.progIdx) % session.trk.n;
+  return {
+    at: session.t,
+    decisionMode: follow ? 'direct-follow' : 'direct-ideal',
+    selectedKind: 'ideal',
+    selectedPlanNumericId: null,
+    selectedPlanKey: null,
+    candidateCount: 0,
+    targetLateral: session.trk.idealPath.off[index]!,
+    interactionCause: null,
+    chosenUtilization: racecraftCurrentGripUtilization(session, entry),
+    selectedLongitudinalProgram: follow
+      ? opportunity.constrainedProgram
+      : opportunity.freeProgram,
+    cornerOwnershipAssertion: null,
+    economics: [],
+    candidates: []
+  };
 }
 
-function refreshDefenseEpisodes(
+function evaluatedPublicationMode(
+  entry: ActiveEntry,
+  context: RacecraftPlanningContext,
+  decision: RacecraftDecision
+): RacecraftPublicationMode {
+  const selected = decision.candidates.find(candidate =>
+    candidate.planNumericId === decision.selectedPlanNumericId);
+  if (!selected) return 'direct-follow';
+  if (selected.plan.mode !== 'ideal' && selected.plan.mode !== 'pit' &&
+      selected.plan.surfaceAuthorization === 'emergency')
+    return 'emergency';
+  if (decision.defenderReclaim) return 'ownership-response';
+  if (context.sideCounterparts.length > 0) return 'side-by-side';
+  if (decision.defensiveTargetCode != null) return 'defense';
+  if (selectedCommittedDefenseView(entry, context, decision))
+    return 'defense';
+  if (decision.cornerOwnershipAssertion) return 'staged-attack';
+  if (selected.plan.mode !== 'ideal' && selected.plan.mode !== 'pit' &&
+      selected.plan.leaderCode &&
+      selected.kind !== 'hold' &&
+      selected.kind !== 'brake-behind' &&
+      selected.kind !== 'recenter')
+    return 'staged-attack';
+  return 'direct-follow';
+}
+
+function updatePendingDecisionReasons(
   session: Session,
-  entries: readonly ActiveEntry[]
+  entry: ActiveEntry,
+  context: RacecraftPlanningContext
 ): void {
-  const active = session._racecraftDefensePairs ??
-    (session._racecraftDefensePairs = new Set());
-  active.clear();
-  for (const attacker of entries) {
-    const selected = attacker.racecraftDecision?.candidates.find(candidate =>
-      candidate.planNumericId ===
-        attacker.racecraftDecision?.selectedPlanNumericId);
-    if (!selected || selected.kind === 'hold' ||
-        selected.kind === 'brake-behind' ||
-        selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
-        !selected.plan.leaderCode) continue;
-    active.add(`${selected.plan.leaderCode}:${attacker.code}`);
+  let pending = (entry.racecraftPendingDecisionReasons ?? 0) |
+    RacecraftPendingDecisionReason.MeasuredState;
+  const forwardKey = context.forwardEntries.map(other =>
+    `${other.code}:${context.publications.get(other.code)
+      ?.publicationRevision ?? -1}`).join('|');
+  if (entry._racecraftForwardPublicationKey !== forwardKey) {
+    entry._racecraftForwardPublicationKey = forwardKey;
+    pending |= RacecraftPendingDecisionReason.ForwardPublication;
   }
-  for (const defender of entries) {
-    const seen = defender._defSeenAttackers;
-    if (!seen) continue;
-    for (const attackerCode of Object.keys(seen))
-      if (!active.has(`${defender.code}:${attackerCode}`))
-        delete seen[attackerCode];
+  const rearKey = context.committedAttacks.map(attack =>
+    `${attack.attackerCode}:${attack.publicationRevision}`).join('|');
+  if (entry._racecraftRearCommitmentKey !== rearKey) {
+    entry._racecraftRearCommitmentKey = rearKey;
+    pending |= RacecraftPendingDecisionReason.RearCommitment;
   }
+  const sideKey = context.sideCounterparts.map(other =>
+    `${other.code}:${session.sideAgreements?.has(
+      roomPairKey(entry, other)
+    ) ? 1 : 0}`).join('|');
+  if (entry._racecraftSideGeometryKey !== sideKey) {
+    entry._racecraftSideGeometryKey = sideKey;
+    pending |= RacecraftPendingDecisionReason.SideGeometry;
+  }
+  const ownershipKey = context.ownershipViews
+    .map(view => view.assertion.assertionId)
+    .sort()
+    .join('|');
+  if (entry._racecraftOwnershipKey !== ownershipKey) {
+    entry._racecraftOwnershipKey = ownershipKey;
+    pending |= RacecraftPendingDecisionReason.Ownership;
+  }
+  const obligationKey = context.obligations.map(obligation =>
+    `${obligation.reason}:${obligation.yielding.code}:` +
+    obligation.beneficiary.code).sort().join('|');
+  if (entry._racecraftObligationKey !== obligationKey) {
+    entry._racecraftObligationKey = obligationKey;
+    pending |= RacecraftPendingDecisionReason.SportingObligation;
+  }
+  const installed = entry.racecraftLongitudinalProgram;
+  if (installed &&
+      entry.prog >= installed.envelope.endProgress - Number.EPSILON)
+    pending |= RacecraftPendingDecisionReason.AuthorityInfeasible;
+  entry.racecraftPendingDecisionReasons = pending;
+}
+
+function installDirectionalDecision(
+  session: Session,
+  entry: ActiveEntry,
+  context: RacecraftPlanningContext
+): void {
+  const decision = entry.racecraftDecision;
+  if (entry.state === 'pitIn' || entry.state === 'pitOut') {
+    installRacecraftLongitudinalProgram(entry, null);
+    return;
+  }
+  const selected = decision?.candidates.find(candidate =>
+    candidate.planNumericId === decision.selectedPlanNumericId);
+  const evaluatorOwnsLane = racecraftSelectedLaneIsExecutable(
+    session,
+    entry,
+    context.evaluationEntries.filter(other => other !== entry),
+    selected
+  );
+  if (selected && evaluatorOwnsLane &&
+      selected.plan.mode !== 'ideal' &&
+      selected.plan.mode !== 'pit' &&
+      selected.kind !== 'hold' &&
+      selected.kind !== 'brake-behind') {
+    const reason = `space:${selected.plan.key}`;
+    const bindingTarget = selected.kind === 'recenter'
+      ? 'self'
+      : context.obligations.find(obligation =>
+          obligation.yielding === entry)?.beneficiary.code ??
+        selected.plan.leaderCode ??
+        selected.slowPointOwnerCode ??
+        'self';
+    const binding = `racecraft:${bindingTarget}`;
+    if (entry.racecraftPathPlan !== selected.plan ||
+        entry.laneProgram.reason !== reason ||
+        entry.laneProgram.binding !== binding)
+      installRacecraftPathPlan(
+        session.trk,
+        entry,
+        reason,
+        selected.plan,
+        binding
+      );
+  }
+  const ownsSpeed = session.mode === 'race' &&
+    session.t - session.goT >= START_BLEND_END &&
+    decision != null;
+  installRacecraftLongitudinalProgram(
+    entry,
+    ownsSpeed ? decision.selectedLongitudinalProgram : null
+  );
+  if (entry.trafficSlowPoint?.reason === 'traffic-follow:cost-candidate')
+    installTrafficSlowPoint(entry, null);
 }
 
 export function updateTraffic(S: Session): void {
   const tr = S.trk, len = tr.len;
   const calibration = racecraftCalibration();
-  S.racecraftDecisionTick = (S.racecraftDecisionTick ?? -1) + 1;
   prunePitReservations(S);
   const list = (S._trafficActiveEntries ??= []) as ActiveEntry[];
   list.length = 0;
@@ -575,8 +622,8 @@ export function updateTraffic(S: Session): void {
       }
       const sep1 = Math.abs(a1.latNow - e.latNow);
       const sbsKey = roomPairKey(e, a1);
-      // This observer starts at geometric non-overlap. Sporting daylight is
-      // enforced only by the live side-agreement partition.
+      // This observer starts at exact-width geometric non-overlap; sub-width
+      // contact remains physical while near-rub preference belongs to J.
       if (pairAlongside &&
           sep1 >= PHYS.carWid &&
           e.state === 'run' && a1.state === 'run'){
@@ -671,6 +718,7 @@ export function updateTraffic(S: Session): void {
         delete e._trafficClosingVelocity;
       }
     }
+    recordSingleFileTrainDiagnostics(S, list);
 
     for (const key in sbsPairs){
       const ep = sbsPairs[key]!;
@@ -705,6 +753,7 @@ export function updateTraffic(S: Session): void {
   }
 
   if (n <= 1){
+    recordSingleFileTrainDiagnostics(S, list);
     for (const key in sbsPairs){
       const ep = sbsPairs[key]!;
       if (sbsEpisodes.length >= 200) sbsEpisodes.shift();
@@ -714,301 +763,195 @@ export function updateTraffic(S: Session): void {
   }
   syncPitPaths(S, list);
   updateRacecraftSideAgreements(S, list);
-  const interactionEpoch = buildRacecraftInteractionEpoch(
+  S.racecraftTrafficEpoch = (S.racecraftTrafficEpoch ?? -1) + 1;
+  const trafficEpoch = S.racecraftTrafficEpoch;
+  pruneRacecraftTacticalPublications(
     S,
-    list,
-    activeByCode
+    new Set(list.map(entry => entry.code))
   );
-  for (const entry of list) {
-    const needsLane = interactionEpoch.demandedCodes.has(entry.code) ||
-      !racecraftLateralAuthoritySettledOnIdeal(S, entry);
-    if (!needsLane) {
-      delete entry.laneBuffer;
-      delete entry._laneBufferRevision;
-    } else if (!entry.laneBuffer ||
-      entry._laneBufferRevision !== (entry.laneEdits ?? 0) ||
-      laneBufferCoverageRequiresRebuild(S, entry)) {
-      evaluateLaneProgram(S, entry);
-    }
-  }
-  const prepublishedClaims = !claimSnapshotMatchesDemand(
-    S,
-    interactionEpoch.demandedCodes
-  );
-  if (prepublishedClaims)
-    publishRacecraftClaimSnapshot(
+  runRacecraftPredictiveSafetyPass(S, list, trafficEpoch);
+  const order = buildRacecraftPlanningOrder(S, list);
+  const evaluatedThisPass = new Set<string>();
+  for (const entry of order.orderedEntries) {
+    const context = buildRacecraftPlanningContext(
       S,
+      entry,
       list,
-      interactionEpoch.demandedCodes
+      S.racecraftClaims ?? new Map()
     );
-  for (const entry of list) {
-    const neighbors = interactionEpoch.neighborsByCode.get(entry.code) ?? [];
-    const localEntries = [entry, ...neighbors];
-    const obligation = obligationsFor(S, entry, localEntries)[0];
+    updatePendingDecisionReasons(S, entry, context);
+    const due = racecraftDecisionSlotIsDue(trafficEpoch, entry);
+    if (due) {
+      if (evaluatedThisPass.has(entry.code)) {
+        recordRacecraftSameSlotReopening(S);
+        throw new Error(
+          `${entry.code} reopened in traffic epoch ${trafficEpoch}`
+        );
+      }
+      evaluatedThisPass.add(entry.code);
+      S.racecraftCommittedAttackViews =
+        (S.racecraftCommittedAttackViews ?? 0) +
+        context.committedAttacks.length;
+      S.racecraftOwnershipInvalidations =
+        (S.racecraftOwnershipInvalidations ?? 0) +
+        context.ownershipInvalidationCount;
+      if (context.ownershipInvalidationReasons.length > 0) {
+        const byReason = S.racecraftOwnershipInvalidationsByReason ??
+          (S.racecraftOwnershipInvalidationsByReason = {});
+        for (const reason of context.ownershipInvalidationReasons)
+          byReason[reason] = (byReason[reason] ?? 0) + 1;
+      }
+      if (context.ownershipViews.length > 0)
+        S.racecraftOwnershipCurrentValidations =
+          (S.racecraftOwnershipCurrentValidations ?? 0) +
+          context.ownershipViews.length;
+      if (entry.state === 'pitIn' || entry.state === 'pitOut') {
+        delete entry.racecraftDecision;
+      } else {
+        const retainedEmergency = publishedEmergencyDecision(S, entry);
+        const opportunity = classifyRacecraftOpportunity(S, context);
+        let decision: RacecraftDecision | null;
+        if (retainedEmergency) {
+          decision = {
+            ...retainedEmergency,
+            at: S.t,
+            decisionMode: 'emergency'
+          };
+        } else if (opportunity.classification === 'direct-ideal' ||
+            opportunity.classification === 'direct-follow') {
+          decision = directDecision(S, entry, opportunity);
+        } else {
+          recordRacecraftDeliberation(S, entry);
+          decision = evaluateRacecraftDecision(
+            S,
+            entry,
+            context.evaluationEntries,
+            context.ownershipViews
+          );
+          if (decision)
+            decision.decisionMode = evaluatedPublicationMode(
+              entry,
+              context,
+              decision
+            );
+          if (decision?.decisionMode === 'defense' ||
+              decision?.decisionMode === 'ownership-response') {
+            const target = decision.decisionMode === 'defense'
+              ? decision.defensiveTargetCode != null
+                ? {
+                    attackerCode: decision.defensiveTargetCode,
+                    cornerId: decision.defensiveCornerId ?? null
+                  }
+                : selectedCommittedDefenseView(entry, context, decision)
+              : context.ownershipViews[0]
+                ? {
+                    attackerCode:
+                      context.ownershipViews[0].attacker.code,
+                    cornerId:
+                      context.ownershipViews[0].assertion.cornerId
+                  }
+                : null;
+            if (!target)
+              throw new Error(
+                `${entry.code} published ${decision.decisionMode} ` +
+                `without a current directional target`
+              );
+            decision.publicationTargetCode = target.attackerCode;
+            decision.publicationCornerId = 'cornerId' in target
+              ? target.cornerId
+              : context.publications.get(target.attackerCode)
+                  ?.cornerId ?? null;
+            if (decision.decisionMode === 'defense') {
+              S.racecraftDefensiveResponses =
+                (S.racecraftDefensiveResponses ?? 0) + 1;
+            }
+          }
+        }
+        if (decision) entry.racecraftDecision = decision;
+        else if (entry.recT > 0 || entry.car.offCourse)
+          delete entry.racecraftDecision;
+        else {
+          throw new Error(
+            `${entry.code} directional evaluator produced no authority`
+          );
+        }
+      }
+      entry._racecraftLastDecisionTrafficEpoch = trafficEpoch;
+      entry.racecraftPendingDecisionReasons =
+        RacecraftPendingDecisionReason.None;
+      installDirectionalDecision(S, entry, context);
+      if (entry.avoidT > 0 && !hasSideAgreement(S, entry.code)) {
+        const avoid = Math.min(3.2, tr.hw - 2.0);
+        setTargetAbsLat(
+          S,
+          entry,
+          entry._avoidSide * avoid,
+          'incident-avoid'
+        );
+      }
+      maintainRacingLineZeroState(
+        S,
+        entry,
+        context.evaluationEntries
+      );
+      publishRacecraftTacticalPublication(
+        S,
+        entry,
+        trafficEpoch
+      );
+    }
+
     const selected = entry.racecraftDecision?.candidates.find(candidate =>
       candidate.planNumericId ===
         entry.racecraftDecision?.selectedPlanNumericId);
-    const targetCode = selected?.slowPointOwnerCode ??
-      (selected?.plan.mode !== 'ideal' && selected?.plan.mode !== 'pit'
-        ? selected?.plan.leaderCode
-        : null) ??
-      entry.racecraftDecision?.candidates.find(candidate =>
-        candidate.kind === 'brake-behind')?.slowPointOwnerCode ??
-      null;
-    const interacting = interactionEpoch.demandedCodes.has(entry.code) &&
-      (!!obligation ||
-        hasSideAgreement(S, entry.code) ||
-        targetCode != null);
-    if (!interacting) continue;
-    const cause = obligation?.reason ??
-      selected?.interactionCause ??
-      'ordinary';
-    const samples = S.racecraftInteractionSamples ??
-      (S.racecraftInteractionSamples = {});
-    samples[cause] = (samples[cause] ?? 0) + 1;
-    const blueForced = obligation?.reason === 'blue-flag' &&
-      obligationGeometryForcesSingleFile(S, obligation);
-    if (blueForced)
-      S.racecraftBlueForcedSpanSamples =
-        (S.racecraftBlueForcedSpanSamples ?? 0) + 1;
-    if (entry.inp.throttle <= 0.01 && entry.inp.brake <= 0.04) {
-      const lifts = S.racecraftLiftSamples ?? (S.racecraftLiftSamples = {});
-      lifts[cause] = (lifts[cause] ?? 0) + 1;
-      if (cause === 'blue-flag') {
-        if (blueForced)
-          S.racecraftBlueForcedLiftSamples =
-            (S.racecraftBlueForcedLiftSamples ?? 0) + 1;
-        else
-          S.racecraftBlueLiftOutsideForcedSpan =
-            (S.racecraftBlueLiftOutsideForcedSpan ?? 0) + 1;
-      }
-    }
-  }
-  refreshDefenseEpisodes(S, list);
-
-  const stagedDecisions: Array<{
-    entry: ActiveEntry;
-    decision: RacecraftDecision | null;
-    neighbors: ActiveEntry[];
-    certificateRenewal: 'authority' | 'emergency' | null;
-  }> = [];
-  for (let entryIndex = 0; entryIndex < list.length; entryIndex++) {
-    const entry = list[entryIndex]!;
-    const neighbors = interactionEpoch.neighborsByCode.get(entry.code) ?? [];
-    S.racecraftTier0Checks = (S.racecraftTier0Checks ?? 0) + 1;
-    const priorDecision = entry.racecraftDecision;
-    if (!interactionEpoch.demandedCodes.has(entry.code)) {
-      const retainedEmergency = publishedEmergencyDecision(S, entry);
-      let decision: RacecraftDecision | null = retainedEmergency;
-      let certificateRenewal: 'emergency' | null = null;
-      if (retainedEmergency) {
-        certificateRenewal = racecraftDecisionCertificateBreakReason(
-          S,
-          entry,
-          []
-        ) != null
-          ? 'emergency'
-          : null;
-      } else if (racecraftLateralAuthoritySettledOnIdeal(S, entry)) {
-        if (priorDecision?.certificate.zeroHazardIdeal &&
-            racecraftDecisionCertificateBreakReason(S, entry, []) == null) {
-          decision = priorDecision;
-        } else {
-          decision = makeRacecraftSettledSolitudeDecision(
-            S,
-            entry,
-            racecraftCurrentGripUtilization(S, entry)
-          );
-          S.racecraftTier0IdealDominance =
-            (S.racecraftTier0IdealDominance ?? 0) + 1;
+    const obligation = context.obligations.find(value =>
+      value.yielding === entry);
+    if (obligation || context.sideCounterparts.length ||
+        context.forwardEntries.length) {
+      const cause = obligation?.reason ??
+        selected?.interactionCause ??
+        'ordinary';
+      const samples = S.racecraftInteractionSamples ??
+        (S.racecraftInteractionSamples = {});
+      samples[cause] = (samples[cause] ?? 0) + 1;
+      const blueForced = obligation?.reason === 'blue-flag' &&
+        obligationGeometryForcesSingleFile(S, obligation);
+      if (blueForced)
+        S.racecraftBlueForcedSpanSamples =
+          (S.racecraftBlueForcedSpanSamples ?? 0) + 1;
+      if (entry.inp.throttle <= 0.01 && entry.inp.brake <= 0.04) {
+        const lifts = S.racecraftLiftSamples ??
+          (S.racecraftLiftSamples = {});
+        lifts[cause] = (lifts[cause] ?? 0) + 1;
+        if (cause === 'blue-flag') {
+          if (blueForced)
+            S.racecraftBlueForcedLiftSamples =
+              (S.racecraftBlueForcedLiftSamples ?? 0) + 1;
+          else
+            S.racecraftBlueLiftOutsideForcedSpan =
+              (S.racecraftBlueLiftOutsideForcedSpan ?? 0) + 1;
         }
       }
-      S.racecraftTier0Accepted = (S.racecraftTier0Accepted ?? 0) + 1;
-      stagedDecisions.push({
-        entry,
-        decision,
-        neighbors: [],
-        certificateRenewal
-      });
-      continue;
     }
-    const breakReason = racecraftDecisionCertificateBreakReason(
-      S,
-      entry,
-      neighbors
-    );
-    let deliberated = false;
-    let retainedInstalledEmergency = false;
-    let decision = priorDecision ?? null;
-    if (breakReason == null) {
-      S.racecraftTier0Accepted = (S.racecraftTier0Accepted ?? 0) + 1;
-    } else {
-      recordCertificateBreak(S, breakReason);
-      const retainedEmergency = publishedEmergencyDecision(S, entry);
-      if (retainedEmergency) {
-        retainedInstalledEmergency = true;
-        decision = retainedEmergency;
-        S.racecraftTier0Accepted = (S.racecraftTier0Accepted ?? 0) + 1;
-      } else {
-        deliberated = true;
-        S.racecraftTier1Deliberations =
-          (S.racecraftTier1Deliberations ?? 0) + 1;
-        decision = evaluateRacecraftDecision(S, entry, list);
-      }
-      if (breakReason !== 'bootstrap' && breakReason !== 'expiry')
-        S.racecraftReactionEvents = (S.racecraftReactionEvents ?? 0) + 1;
-    }
-    if (deliberated) {
-      if (priorDecision) entry.racecraftDecision = priorDecision;
-      else delete entry.racecraftDecision;
-    }
-    stagedDecisions.push({
-      entry,
-      decision,
-      neighbors,
-      certificateRenewal: breakReason != null && decision != null
-        ? retainedInstalledEmergency
-          ? 'emergency'
-          : 'authority'
-        : null
-    });
-  }
-  for (const staged of stagedDecisions) {
-    if (staged.decision) staged.entry.racecraftDecision = staged.decision;
-    else delete staged.entry.racecraftDecision;
-  }
 
-  for (const staged of stagedDecisions) {
-    const { entry, decision, neighbors } = staged;
-    const localEntries = [entry, ...neighbors];
-    if (entry.state === 'pitIn' || entry.state === 'pitOut') {
-      installRacecraftLongitudinalProgram(entry, null);
-      continue;
-    }
-    const selected = decision?.candidates.find(candidate =>
-      candidate.planNumericId === decision.selectedPlanNumericId);
-    const obligationParticipant = isObligationParticipant(
-      S,
-      entry,
-      localEntries
-    );
-    const pitDestination = !!(entry.pitArm || entry.boxArm) &&
-      selected?.plan.mode !== 'ideal' && selected?.plan.mode !== 'pit' &&
-      selected?.plan.key.includes(':pit-destination:');
-    const evaluatorOwnsLane = racecraftSelectedLaneIsExecutable(
-      S,
-      entry,
-      neighbors,
-      selected
-    );
-    if (selected && evaluatorOwnsLane &&
-        selected.plan.mode !== 'ideal' &&
-        selected.plan.mode !== 'pit' &&
-        (pitDestination ||
-          (selected.kind !== 'hold' && selected.kind !== 'brake-behind'))) {
-      const reason = `space:${selected.plan.key}`;
-      const bindingTarget = selected.kind === 'recenter'
-        ? 'self'
-        : obligationsFor(S, entry, localEntries)[0]?.beneficiary.code ??
-          selected.plan.leaderCode ??
-          selected.slowPointOwnerCode ??
-          'self';
-      const binding = pitDestination
-        ? `pit-destination:${entry.code}`
-        : `racecraft:${bindingTarget}`;
-      if (entry.racecraftPathPlan !== selected.plan ||
-          entry.laneProgram.reason !== reason ||
-          entry.laneProgram.binding !== binding) {
-        const attacker = selected.kind === 'hold' ||
-            selected.kind === 'brake-behind'
-          ? null
-          : racecraftDefensiveAttacker(
-              S,
-              entry,
-              list,
-              selected.targetLateral
-            );
-        if (attacker && entry._racecraftAppliedKind !== selected.kind &&
-            claimDefenseResponse(entry, attacker)) {
-          entry._defendingAgainst = attacker.code;
-          entry._defMoveKey = `${attacker.code}:active`;
-          S.defMoveN = (S.defMoveN || 0) + 1;
-        }
-        installRacecraftPathPlan(
-          tr,
-          entry,
-          reason,
-          selected.plan,
-          binding
-        );
-      }
-      entry._racecraftAppliedAt = S.t;
-      entry._racecraftAppliedKind = selected.kind;
-    } else if (selected) {
-      entry._racecraftAppliedKind = selected.kind;
-    }
-    const racecraftOwnsSpeed =
-      S.mode === 'race' &&
-      S.t - S.goT >= START_BLEND_END &&
-      !!selected;
-    const selectedLongitudinal =
-      decision?.selectedLongitudinalProgram ?? null;
-    installRacecraftLongitudinalProgram(
-      entry,
-      racecraftOwnsSpeed
-        ? selectedLongitudinal
-        : null
-    );
-    if (entry.trafficSlowPoint?.reason === 'traffic-follow:cost-candidate')
-      installTrafficSlowPoint(entry, null);
-    if (selected) {
-      entry._racecraftAppliedAt = S.t;
-      entry._racecraftAppliedKind = selected.kind;
+    const index = Math.max(0, entry.car.progIdx) % tr.n;
+    entry.lat = entry.latNow - (tr.idealPath.off[index] ?? 0);
+    const transitionLaneAuthority = !entry.racecraftLateralProgram &&
+      (entry.laneProgram.points.length > 0 ||
+        Math.abs(entry.laneProgram.bias) > Number.EPSILON ||
+        entry.laneProgram.binding != null);
+    if (entry.pathPlan?.mode !== 'pit' && !transitionLaneAuthority) {
+      delete entry.laneBuffer;
+      delete entry._laneBufferRevision;
+    } else if (entry.pathPlan?.mode !== 'pit' &&
+        transitionLaneAuthority &&
+        (!entry.laneBuffer ||
+          entry._laneBufferRevision !== (entry.laneEdits ?? 0) ||
+          transitionLaneBufferCoverageRequiresRebuild(S, entry))) {
+      evaluateLaneProgram(S, entry);
     }
   }
   observeRacecraftDecisions(S, list);
-  for (const e of list){
-    if (e.state === 'pitIn' || e.state === 'pitOut') continue;
-    if (e.avoidT > 0 && !hasSideAgreement(S, e.code)){
-      const avoid = Math.min(3.2, tr.hw - 2.0);
-      setTargetAbsLat(S, e, e._avoidSide * avoid, 'incident-avoid');
-    }
-    const neighbors = interactionEpoch.neighborsByCode.get(e.code) ?? [];
-    maintainRacingLineZeroState(S, e, [e, ...neighbors]);
-    const index = Math.max(0, e.car.progIdx) % tr.n;
-    e.lat = e.latNow - (tr.idealPath?.off[index] ?? 0);
-    const settledSolitude =
-      !interactionEpoch.demandedCodes.has(e.code) &&
-      racecraftLateralAuthoritySettledOnIdeal(S, e);
-    if (settledSolitude) {
-      delete e.laneBuffer;
-      delete e._laneBufferRevision;
-    } else if (e.pathPlan?.mode !== 'pit' &&
-      (e._laneBufferRevision !== (e.laneEdits ?? 0) ||
-        laneBufferCoverageRequiresRebuild(S, e))) {
-      evaluateLaneProgram(S, e);
-    }
-  }
-  if (interactionEpoch.demandedCodes.size > 0)
-    publishRacecraftClaimSnapshot(
-      S,
-      list,
-      interactionEpoch.demandedCodes
-    );
-  for (const staged of stagedDecisions) {
-    if (staged.certificateRenewal === 'emergency')
-      renewPublishedEmergencyCertificate(
-        S,
-        staged.entry,
-        staged.neighbors
-      );
-    else if (staged.certificateRenewal === 'authority')
-      sealRacecraftDecisionCertificate(
-        S,
-        staged.entry,
-        staged.neighbors
-      );
-  }
   updateAttackEpisodes(S);
   recordTrafficFeel(S, list);
   updateStallDiagnostics(S);

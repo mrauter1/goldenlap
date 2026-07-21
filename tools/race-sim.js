@@ -170,7 +170,8 @@ if (forceRain && forceDry) throw new Error('Choose only one of --dry or --rain')
           info.sbsT = S.sbsT || 0;
           info.utilizationMistakes = S.utilizationMistakes || 0;
           info.racecraftMaximumCandidates = S.racecraftMaximumCandidates || 0;
-          info.defMoveN = S.defMoveN || 0; info.defRepeatN = S.defRepeatN || 0;
+          info.defensiveMoves = S.racecraftDefensiveMovesCommitted || 0;
+          info.defensiveContinuations = S.racecraftDefensiveMovesContinued || 0;
           info.spinN = S.spinN || 0;
           info.hitSamples = S.hitSamples || [];
           info.wetPeak = Math.max(info.wetPeak || 0, S.wet || 0);
@@ -206,7 +207,7 @@ if (forceRain && forceDry) throw new Error('Choose only one of --dry or --rain')
         return info;
       }, { traceCodes, traceWindow });
       results.push(stat);
-      console.log(`R${round + 1} ${stat.name}: laps ${stat.laps} · passes ${stat.passes} · contacts ${stat.hitN} (${stat.hitLight} light, ${stat.hitHard} hard: ${stat.hitHardRear} rear/${stat.hitHardSide} side, ${stat.hitHardRoom} room, ${stat.hitHardCorner} corner, max ${stat.hitMax.toFixed(1)}, ${stat.hitOpenHard} lap 1) · SBS ${stat.sbsT.toFixed(1)}s/${stat.sbsEpisodes} med ${stat.sbsMedian.toFixed(2)}s contact ${(stat.sbsContact * 100).toFixed(1)}% · attacks ${stat.attackCompletions}/${stat.attackInitiations} · station gap mean ${stat.stationGapMeanMetres.toFixed(2)}m · utilization mistakes ${stat.utilizationMistakes} · evaluator candidates max ${stat.racecraftMaximumCandidates} · def ${stat.defMoveN}/${stat.defRepeatN} repeats · spins ${stat.spinN} · DNF ${stat.dnfs} · rain ${stat.rain ? 'yes(peak ' + (stat.wetPeak || 0).toFixed(2) + ')' : 'no'} · classification ${stat.classOk ? 'OK' : 'BROKEN'}`);
+      console.log(`R${round + 1} ${stat.name}: laps ${stat.laps} · passes ${stat.passes} · contacts ${stat.hitN} (${stat.hitLight} light, ${stat.hitHard} hard: ${stat.hitHardRear} rear/${stat.hitHardSide} side, ${stat.hitHardRoom} room, ${stat.hitHardCorner} corner, max ${stat.hitMax.toFixed(1)}, ${stat.hitOpenHard} lap 1) · SBS ${stat.sbsT.toFixed(1)}s/${stat.sbsEpisodes} med ${stat.sbsMedian.toFixed(2)}s contact ${(stat.sbsContact * 100).toFixed(1)}% · attacks ${stat.attackCompletions}/${stat.attackInitiations} · station gap mean ${stat.stationGapMeanMetres.toFixed(2)}m · utilization mistakes ${stat.utilizationMistakes} · evaluator candidates max ${stat.racecraftMaximumCandidates} · def ${stat.defensiveMoves}/${stat.defensiveContinuations} moves/continuations · spins ${stat.spinN} · DNF ${stat.dnfs} · rain ${stat.rain ? 'yes(peak ' + (stat.wetPeak || 0).toFixed(2) + ')' : 'no'} · classification ${stat.classOk ? 'OK' : 'BROKEN'}`);
       if (debugHits) for (const h of stat.hitSamples)
         console.log(`  hit ${h.imp.toFixed(1)} @${h.t.toFixed(1)}s ${h.a}/${h.b} ${h.stateA}/${h.stateB} pit${h.pitWA.toFixed(1)}/${h.pitWB.toFixed(1)} dAB${h.dAB.toFixed(1)} ds${h.ds.toFixed(1)} sep${h.sep.toFixed(1)} lat${h.latA.toFixed(1)}/${h.latB.toFixed(1)} tgt${h.tgtA.toFixed(1)}/${h.tgtB.toFixed(1)} v${h.spdA.toFixed(1)}/${h.spdB.toFixed(1)} dh${h.dh.toFixed(2)} yaw${h.yawA.toFixed(2)}/${h.yawB.toFixed(2)} r${h.rA.toFixed(1)}/${h.rB.toFixed(1)} slip${h.slipA.toFixed(2)}/${h.slipB.toFixed(2)} brk${h.brakeA.toFixed(1)}/${h.brakeB.toFixed(1)} cap${h.capA.toFixed(1)}/${h.capB.toFixed(1)} lift${h.liftA.toFixed(1)}/${h.liftB.toFixed(1)} rec${h.recA.toFixed(1)}/${h.recB.toFixed(1)} fail${h.failA ? 1 : 0}/${h.failB ? 1 : 0} prev${h.prevA.toFixed(1)}/${h.prevB.toFixed(1)} k${h.k.toFixed(4)} room${h.room ? 1 : 0} off${h.off ? 1 : 0} atk${h.atk ? 1 : 0}`);
       if (debugHits) for (const [pair, h] of Object.entries(stat.hitPairs).sort((a, b) => b[1].n - a[1].n).slice(0, 10))
@@ -229,7 +230,6 @@ if (forceRain && forceDry) throw new Error('Choose only one of --dry or --rain')
     for (const r of results){
       if (r.hitHard > 30) strictErrors.push(`${r.name}: hard hits ${r.hitHard} > 30`);
       if (r.sbsMedian < 1.5) strictErrors.push(`${r.name}: SBS median ${r.sbsMedian.toFixed(2)} < 1.50`);
-      if (r.defRepeatN !== 0) strictErrors.push(`${r.name}: repeated defense moves ${r.defRepeatN}`);
       if (r.dnfs < 0 || r.dnfs > 5) strictErrors.push(`${r.name}: DNF ${r.dnfs} outside 0..5`);
       if (!r.classOk) strictErrors.push(`${r.name}: invalid classification`);
     }

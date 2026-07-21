@@ -74,7 +74,8 @@ export function createApplicationRuntime(options: RuntimeOptions): ApplicationRu
       pitSkill: chief.skill,
       pitFocus: chief.foc,
       tuneBonus: state.tune?.bonus ?? 0,
-      tuningPoints: state.tune?.pts ?? 0
+      tuningPoints: state.tune?.pts ?? 0,
+      predictiveSafetyHz: state.predictiveSafetyHz
     };
   }
 

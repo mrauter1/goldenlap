@@ -12,11 +12,10 @@ import type {
 } from '../../../src/session/model';
 import {
   contractIsRevoked,
+  isFixedOccupancy,
   obligationsFor,
   owes
 } from '../../../src/session/racecraft/relations';
-import { createRacecraftClaimStations } from
-  '../../../src/session/racecraft/claim';
 
 type ActiveEntry = Entry & { car: Car };
 
@@ -117,33 +116,14 @@ describe('stateless racecraft obligations', () => {
 });
 
 describe('stateless hazard publication', () => {
-  test('publishes actual revoked occupancy without obstacle episodes', () => {
+  test('classifies measured stopped occupancy without a tactical publication', () => {
     const follower = activeEntry('FOLLOWER', 100, 34);
     const stopped = activeEntry('STOPPED', 130, 0);
     const session = relationSession('race', [follower, stopped]);
-    session.racecraftClaims = new Map([[
-      stopped.code,
-      {
-        code: stopped.code,
-        source: 'ballistic',
-        predictionKey: `ballistic:${stopped.code}`,
-        lateralAuthorityRevision: -1,
-        longitudinalAuthorityRevision: -1,
-        publicationRevision: 0,
-        publishedAt: session.t,
-        originS: stopped.car.s,
-        originCentre: stopped.latNow,
-        originSpeed: stopped.spd,
-        originHeadingOffsetRadians: 0,
-        trusted: false,
-        lateralTrackingErrorThresholdMetres: PHYS.carWid / 10,
-        longitudinalTrackingErrorThresholdMetres: PHYS.carWid / 10,
-        trackingErrorMetres: 0,
-        stations: createRacecraftClaimStations(0)
-      }
-    ]]);
 
-    expect(contractIsRevoked(session, stopped)).toBe(true);
+    expect(contractIsRevoked(session, stopped)).toBe(false);
+    expect(isFixedOccupancy(session, stopped)).toBe(true);
+    expect(session.racecraftClaims?.has(stopped.code) ?? false).toBe(false);
     expect('obstacleEpisodes' in session).toBe(false);
   });
 });

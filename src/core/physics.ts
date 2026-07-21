@@ -51,6 +51,30 @@ export function bodyOverlapFraction(
   return Math.min(1, overlap / PHYS.carWid);
 }
 
+/** Allocation-free scalar shared by candidate rollouts and wake consumers. */
+export function wakeStrength(
+  downstreamDistance: number,
+  lateralSeparation: number,
+  speed: number,
+  characteristicDistance: number,
+  spreadRate: number
+): number {
+  const distance = Math.max(0, downstreamDistance);
+  const wakeScale = Math.max(
+    Number.EPSILON,
+    characteristicDistance,
+    Math.max(0, speed)
+  );
+  const ratio = distance / wakeScale;
+  const longitudinal = Math.min(0.8, 1 / (1 + ratio * ratio));
+  const plumeHalfWidth = PHYS.carWid / 2 +
+    Math.max(0, spreadRate) * distance;
+  return longitudinal * bodyOverlapFraction(
+    lateralSeparation,
+    plumeHalfWidth
+  );
+}
+
 /**
  * One wake object shared by drag and grip consumers. The longitudinal form is
  * the existing smooth inverse-square decay; only physical body coverage turns
@@ -62,19 +86,12 @@ export function wakeEffect(
   speed: number,
   parameters: WakeParameters
 ): WakeEffect {
-  const distance = Math.max(0, downstreamDistance);
-  const wakeScale = Math.max(
-    Number.EPSILON,
-    parameters.characteristicDistance,
-    Math.max(0, speed)
-  );
-  const ratio = distance / wakeScale;
-  const longitudinal = Math.min(0.8, 1 / (1 + ratio * ratio));
-  const plumeHalfWidth = PHYS.carWid / 2 +
-    Math.max(0, parameters.spreadRate) * distance;
-  const strength = longitudinal * bodyOverlapFraction(
+  const strength = wakeStrength(
+    downstreamDistance,
     lateralSeparation,
-    plumeHalfWidth
+    speed,
+    parameters.characteristicDistance,
+    parameters.spreadRate
   );
   return { drag: strength, grip: strength };
 }

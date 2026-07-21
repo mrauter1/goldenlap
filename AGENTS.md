@@ -22,19 +22,33 @@ Toolchain: Bun 1.3.14, Node 22.22.1.
 The suites exist on a cost ladder. Escalate only when the cheaper rung cannot
 answer the question; most iterations need only the first two rungs.
 
-**Every edit (seconds):** `bun run typecheck`, `bun run check:boundaries`, and
-the unit tests for the touched area directly —
+**Validate coherent changes, not individual patches.** For a small task, run
+`bun run typecheck`, `bun run check:boundaries`, and the directly touched unit
+test once after the logical change is complete. For a large task or refactor,
+do not run them after every patch and do not run them while the tree is
+intentionally compile-incomplete. Batch related edits and run the three checks
+only at a substantial compile-ready boundary where the result informs the
+next implementation step, before a playable/phase handoff, and at task
+finish. Several patches to one subsystem normally form one validation
+boundary. A red check is rerun only after code relevant to that failure has
+changed.
+
+Run the touched test directly —
 `bun test tests/unit/session/traffic.test.ts` (or the relevant file). Unit
 tests do not need the bundle; skip `bun run test:unit` (it rebuilds) in favor
-of `bun run test:unit:raw` or a single file.
+of `bun run test:unit:raw` or a single file. Boundary checks are mandatory at
+the logical boundaries above; they are not a reason to interrupt every local
+edit.
 
-**Behavior change in `session`/`core` (tens of seconds):** one targeted probe
-beats a suite. A seeded headless race or scenario
+**Behavior change in `session`/`core` (tens of seconds):** after the owning
+behavior is implemented, one targeted probe beats a suite. A seeded headless
+race or scenario
 (`bun tools/simulate-headless.ts --track prado --seed 101`, or a small script
 against `runHeadlessRace`) answers "did the behavior move the way I intended"
 directly. `bun run test:invariants` covers the zero-tolerance rules. Headless
 and browser share one code path, so **never launch the browser to verify
-session/core logic**.
+session/core logic**. If a pending implementation step can invalidate the
+probe, implement that step first and defer the probe.
 
 **End of a phase / before handing work back:** `bun run verify:fast`. This is
 the first rung that runs statistics; run it once per coherent change set, not
@@ -78,36 +92,81 @@ zero-tolerance invariant might be affected, the user asked for numbers, or
 a phase/merge gate is closing. When in doubt between auditing and handing
 back sooner, hand back sooner.
 
-Handing back is **not** stopping: the user's play-testing runs in
-parallel with continued implementation. Post the playable build and the
-short summary, then continue with the next planned item immediately —
-never idle waiting for the user's verdict on finished work. When feedback
-arrives, fold it in like an audit result (fast loop on the implicated
-behavior, then resume).
+A playable phase handoff is a valid stopping point. Post the build and a short
+summary of what changed and what to watch, then stop before beginning a later
+behavioral phase unless the user explicitly requested uninterrupted
+multi-phase execution. Even for an explicitly multi-phase task, close and
+validate the current phase before starting the next; never pull later-phase
+tests forward merely because the full roadmap is in scope. When play-test
+feedback arrives, fold it in like an audit result with a fast loop on the
+implicated behavior.
 
-## Audit orchestration — audits run beside the work, not instead of it
+## Audit orchestration — dependencies first, then parallelize independent work
 
 Audits (scenario probes, balance reports, optimizers, statistical tiers —
-see `audit_toolkit_plan.md`) are probes, not gates on thinking:
+see `audit_toolkit_plan.md`) are probes, not gates on thinking. Typecheck,
+boundary checks, and directly touched unit tests are ordinary verification,
+not audits, and run inline at the logical boundaries above.
 
-- **Every audit runs in a subagent or background process.** The
-  orchestrating agent dispatches it and immediately continues — implementing
-  the next plan item, analyzing code, preparing the following probe, or
-  drafting the fix the audit is expected to demand.
-- **Never idle-wait on an audit while there is improvable work.** Waiting is
-  acceptable only when every remaining task genuinely depends on the
-  result — the plans are deliberately structured with independent phases so
-  that this is rare. If you find yourself blocked on one audit, you picked
-  the work order wrong; take the next independent item.
+- **Order audits after their implementation dependencies.** Before
+  dispatching an audit, identify the next tasks to be implemented. If any of
+  them can change the code, data, fixture, controller, or semantics the audit
+  measures, implement those dependent tasks first. Run the audit only when
+  the next work cannot invalidate its result. Do not compensate for bad
+  ordering by repeatedly auditing an implementation that is still changing.
+- **Audits run in a subagent or background process.** Once their dependencies
+  are complete, dispatch them and continue only with implementation work that
+  cannot affect their result. Do not run a supposedly parallel audit beside
+  edits to its subject.
+- **Never idle-wait on an audit while there is genuinely independent work.**
+  Waiting is acceptable when all remaining work depends on its result.
+  Choosing dependency order correctly matters more than manufacturing
+  parallelism.
 - **Use results to probe, adjust, or pivot** when they arrive: green →
   continue the current line; amber → finish the edit in flight, then adjust
   the implicated parameter and re-probe; red → stop the affected line only,
   fix or hand the finding to its owning phase, re-probe. A red audit with a
   named owner is a finding, not an emergency stop for unrelated work.
-- **Keep audits cheap so this stays true**: the audit ladder (Tier 0
+- **One audit answers one question.** Start with one seed, one track, the
+  shortest useful window, and the smallest existing scenario. Do not turn an
+  implementation check into a track/seed/gap/duration matrix, progressive
+  time-window loop, multi-lap race, or parameter sweep. Those belong to an
+  explicitly owned later comparison, balance, or release phase. One focused
+  rerun is appropriate after a relevant fix; repeated exploratory reruns mean
+  the question or owning phase is wrong.
+- **Temporary instrumentation stays bounded.** Prefer an existing counter or
+  one narrowly scoped diagnostic. If answering a question requires multiple
+  custom bundles, repeated source transforms, or a new sweep harness, stop and
+  either add one proper bounded diagnostic in the owning implementation phase
+  or defer the audit.
+- **Keep audits cheap so this stays true:** the audit ladder (Tier 0
   closed-form → Tier 1 scenarios → Tier 2 seeded races → Tier 3 statistics)
   exists so the answer you need is usually seconds away — escalate tiers
   only when the cheaper one cannot answer.
+
+## Test ownership and deferral
+
+Tests and audits belong to the phase that provides all behavior they depend
+on:
+
+- Give every nontrivial integration scenario, comparison, population check,
+  and benchmark an owning phase and an earliest runnable phase.
+- During a phase, run only tests whose required production authority is
+  implemented and whose result can affect that phase's next decision.
+- Add focused unit coverage alongside the implementation it specifies. Do not
+  pre-build or repeatedly run end-to-end tests for controllers, UI, analytic
+  representations, multi-car outcomes, or performance work owned by a later
+  phase.
+- A later-phase test that would currently be red is pending evidence, not a
+  current regression or blocker. Record it briefly under its owner and
+  continue the present phase.
+- Pass completion, long train escape, multi-track robustness, population
+  bands, and full-race economics are not substitutes for a causal unit or
+  micro-scenario. Run them only when their complete dependency chain and
+  owning phase are ready.
+- Phase plans should list their minimal blocking checks separately from final
+  acceptance evidence. An unphased catalog of desirable scenarios is not an
+  instruction to run all of them immediately.
 
 ## Greenfield: plans outrank legacy — discard, don't preserve
 

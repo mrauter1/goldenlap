@@ -129,20 +129,6 @@
       "owner": "test:invariants"
     },
     {
-      "id": "invariant.repeated_defense",
-      "unit": "occurrences",
-      "scope": "one attack episode",
-      "aggregation": "sum",
-      "distribution": "categorical",
-      "minimumSamples": 1,
-      "classification": "invariant",
-      "normal": { "maximum": 0 },
-      "acceptable": { "maximum": 0 },
-      "absolute": { "maximum": 0 },
-      "rationale": "The one-move defense rule is a state-machine constraint, not a random performance target.",
-      "owner": "race-sim"
-    },
-    {
       "id": "invariant.soft_contact_concede",
       "unit": "occurrences",
       "scope": "collision episodes",
@@ -491,28 +477,6 @@
       "minimumSamples": 1,
       "classification": "target",
       "rationale": "Observe straight-line rear-loss canaries before phase-lock enforcement.",
-      "owner": "racecraft-feel-calibration"
-    },
-    {
-      "id": "race.defense_move_in_braking_per_race",
-      "unit": "executed command changes per race",
-      "scope": "track/weather stratum",
-      "aggregation": "Poisson rate",
-      "distribution": "observe-only",
-      "minimumSamples": 1,
-      "classification": "target",
-      "rationale": "Observe authored defensive line changes from brake point to turn-in; the focused legality probe remains the fail-fast gate.",
-      "owner": "racecraft-feel-calibration"
-    },
-    {
-      "id": "race.defense_mirror_per_race",
-      "unit": "executed mirrors per race",
-      "scope": "track/weather stratum",
-      "aggregation": "Poisson rate",
-      "distribution": "observe-only",
-      "minimumSamples": 1,
-      "classification": "target",
-      "rationale": "Observe reactive defensive mirrors before phase-lock enforcement; blocked attempts are not violations.",
       "owner": "racecraft-feel-calibration"
     },
     {

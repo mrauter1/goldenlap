@@ -181,8 +181,8 @@ const PHASE_CASES: Readonly<Record<EffectPhase, readonly EffectCaseSpec[]>> = {
   M6: [
     {
       phase: 'M6',
-      scenario: 'tow-run',
-      variant: 'cost-evaluated-tow'
+      scenario: 'near-touch-tow',
+      variant: 'cost-evaluated-near-touch'
     },
     {
       phase: 'M6',
@@ -264,7 +264,6 @@ function effectMetrics(
     racecraftSelectedJDroppedSamples: selectedJ.droppedSamples,
     racecraftSelectedJOwnTimeSeconds: selectedJ.ownTimeSeconds,
     racecraftSelectedJBillSeconds: selectedJ.billSeconds,
-    racecraftSelectedJRecourseSeconds: selectedJ.recourseSeconds,
     racecraftSelectedJTieBandSeconds: selectedJ.tieBandSeconds,
     racecraftSelectedJTotalSeconds: selectedJ.totalSeconds,
     racecraftSelectedJHazardCount: selectedJ.hazardCount,
@@ -466,7 +465,6 @@ export function classifyEffectCase(
     const finiteJ = [
       selectedJ.ownTimeSeconds,
       selectedJ.billSeconds,
-      selectedJ.recourseSeconds,
       selectedJ.tieBandSeconds,
       selectedJ.totalSeconds,
       selectedJ.hazardCount

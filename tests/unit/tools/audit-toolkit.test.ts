@@ -86,10 +86,10 @@ describe('tiered audit toolkit', () => {
 
     expect(['green', 'undecided'])
       .toContain(anticipatory.audit?.verdict ?? 'undecided');
-    expect(anticipatory.metrics.defenseMoveInBraking).toBe(0);
+    expect(anticipatory.metrics.auditDefenseMoveAfterBrake).toBe(0);
     expect(committed.audit?.verdict).toBe('green');
-    expect(committed.metrics.defenseMoves).toBe(0);
-    expect(committed.metrics.defenseMoveInBraking).toBe(0);
+    expect(committed.metrics.auditDefensiveMovesCommitted).toBe(0);
+    expect(committed.metrics.auditDefenseMoveAfterBrake).toBe(0);
 
     const inconclusive = classifyEffectCase(
       {
@@ -108,7 +108,7 @@ describe('tiered audit toolkit', () => {
 
   test('observes the evaluator selecting feasible passing space', () => {
     const summary = runFocusedSession(prado, {
-      scenario: 'attack-launch', seed: 11, deadlineMs: 5_000, stopWhenDecided: true
+      scenario: 'attack-launch', seed: 101, deadlineMs: 5_000, stopWhenDecided: true
     });
     const verdict = classifyEffectCase(
       { phase: 'L4', scenario: 'attack-launch', variant: 'tow-until-brake-derived-launch' },
@@ -116,20 +116,25 @@ describe('tiered audit toolkit', () => {
       null
     );
 
+    expect(summary.audit?.verdict).toBe('green');
     expect(summary.metrics.attackInitiations).toBeGreaterThan(0);
     expect(summary.metrics.candidatesEvaluated).toBeGreaterThan(0);
     expect(summary.metrics.maximumCandidates).toBeLessThanOrEqual(6);
     expect(summary.metrics.maximumPathsMaterialized).toBe(0);
-    expect(verdict.status).not.toBe('red');
+    expect(verdict.status).toBe('green');
   });
 
-  test('separates traffic braking from corner braking and retires overlap as a tow gate', () => {
+  test('preserves a feasible free side while reopening for braking and retires overlap as a tow gate', () => {
     const alongside = runFocusedSession(prado, {
       scenario: 'alongside-straight', seed: 11, deadlineMs: 5_000,
       stopWhenDecided: true
     });
     const tow = runFocusedSession(prado, {
       scenario: 'tow-run', seed: 11, deadlineMs: 5_000, stopWhenDecided: true
+    });
+    const nearTouch = runFocusedSession(prado, {
+      scenario: 'near-touch-tow', seed: 101, deadlineMs: 5_000,
+      stopWhenDecided: true
     });
 
     expect(alongside.metrics.brakeWhileAlongside).toBe(0);
@@ -141,6 +146,16 @@ describe('tiered audit toolkit', () => {
       tow,
       null
     ).status).toBe('amber');
+    expect(nearTouch.metrics.auditEscapeAvailableSeen).toBe(1);
+    expect(nearTouch.audit?.verdict).toBe('green');
+    expect(classifyEffectCase(
+      {
+        phase: 'M6', scenario: 'near-touch-tow',
+        variant: 'cost-evaluated-near-touch'
+      },
+      nearTouch,
+      null
+    ).status).toBe('green');
   });
 
   test('classifies tucked-follow and battle economy as normalized losses', () => {

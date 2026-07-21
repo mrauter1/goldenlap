@@ -23,7 +23,6 @@ export function raceInvariantFailures(summary: HeadlessRaceSummary): string[] {
   if (summary.metrics.unexplainedStalls > 0) failures.push('unexplained-stall');
   if (summary.metrics.pitDeadlocks > 0) failures.push('pit-deadlock');
   if (summary.metrics.pitFalseLeaders > 0) failures.push('pit-false-leader');
-  if (summary.metrics.repeatedDefenses > 0) failures.push('repeated-defense');
   if (summary.metrics.softContactConcedes > 0) failures.push('soft-contact-concede');
   if (summary.metrics.hardContacts > HARD_CONTACT_CAP) failures.push('hard-contact-cap');
   // Light contacts are an uncapped racing outcome. They remain observable,

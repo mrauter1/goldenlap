@@ -1,29 +1,50 @@
 import {
   backwardInducedSpeedLimit,
   BOT_BRAKING_EFFORT_MAXIMUM,
-  BOT_BRAKING_EFFORT_MINIMUM,
-  PATH_FOLLOWER_SETTLE_DISTANCE
+  BOT_BRAKING_EFFORT_MINIMUM
 } from '../../core/autopilot';
 import {
   isHardContactImpulse,
   sweptCarContactEpisodes,
   sweptCarContactIntervals,
   sweptCarMinimumClearance,
-  type SweptCarContactEpisode
+  type SweptCarContactEpisode,
+  type SweptCarPosePair
 } from '../../core/collision';
 import { sampleCornerLineEta } from '../../core/corner-lines';
-import type { LegacyCorner, Track } from '../../core/model';
+import { nextCorner } from '../../core/racing-line';
+import type {
+  CompactLateralProgram,
+  LegacyCorner,
+  SpeedEnvelope,
+  Track
+} from '../../core/model';
+import {
+  compactLateralGeometryAtProgress,
+  writeTrackIdealLateralAnalytic,
+  writeCompactLateralGeometryAtProgress,
+  writeCompactLateralPoseAtProgress,
+  writeSampleCompactLateralProgram,
+  type CompactLateralSample
+} from
+  '../../core/lateral-program';
 import {
   availableDeceleration,
   longitudinalAccelerationHeadroom,
   longitudinalGripHeadroomFraction,
   PHYS,
-  wakeEffect
+  wakeStrength
 } from '../../core/physics';
+import { normalLateralEnvelope } from '../../core/surface';
 import {
-  emergencyLateralIsLegal,
-  normalLateralEnvelope
-} from '../../core/surface';
+  cloneSpeedEnvelope,
+  createSpeedEnvelopeConstructionBuffers,
+  speedEnvelopeAddsConstraint,
+  speedEnvelopeAt,
+  speedEnvelopeFromSamples,
+  speedEnvelopeFromUniformSamples,
+  type SpeedEnvelopeConstructionBuffers
+} from '../../core/speed-envelope';
 import { clamp, normAng } from '../../shared/math';
 import type {
   Entry,
@@ -35,37 +56,43 @@ import type {
   RacecraftCandidateKind,
   RacecraftCandidateSeed,
   RacecraftClaim,
+  RacecraftCornerOwnershipAssertion,
   RacecraftDecision,
-  RacecraftDecisionCertificateBreakReason,
   RacecraftDecisionLogEntry,
   RacecraftDirection,
   RacecraftEvaluatorWorkDiagnostics,
   RacecraftInteractionCause,
+  RacecraftTrajectoryProgram,
+  RacecraftTimedTrajectoryProgram,
   Session
 } from '../model';
 import {
   entryDownforceScale,
-  entryMargin,
-  entryMods,
   entryMu,
-  flowOff,
   LIFT_MARGIN_PENALTY,
   START_BLEND_END,
   TRAF_DT
 } from '../strategy';
 import { RACECRAFT_DECISION_INTERVAL_SECONDS } from './cadence';
 import {
-  createRacecraftClaimStations,
   racecraftClaimAtEvaluationEpoch,
+  racecraftClaimHorizonSeconds,
+  racecraftClaimSegmentCount,
+  racecraftClaimSegmentEndTime,
   racecraftClaimStateAtTime,
   writeRacecraftClaimStateAtTime,
+  writeRacecraftClaimTowStateAtTime,
   type RacecraftClaimState,
+  type RacecraftClaimTowState,
   type RacecraftEvaluationClaim
 } from './claim';
 import {
-  arrivalQuantizedResponsibility,
-  pairwiseDifferenceTieBand,
-  responseSlack
+  createRacecraftTrajectoryProgram,
+  writeRacecraftTrajectorySegment
+} from './claim';
+import {
+  directionalCandidateObjectiveSeconds,
+  pairwiseDifferenceTieBand
 } from './cost-function';
 import {
   battleSpendSeconds,
@@ -83,17 +110,18 @@ import {
   measuredAttackTransitionLossSeconds
 } from './attempt-loss';
 import {
-  measuredContactEpisodeLossBound,
-  measuredContactEpisodeLossSeconds
-} from './contact-loss';
-import {
   evaluateManeuverPlanCompactWithSampler,
   maneuverPredictionStationTime,
   MANEUVER_PREDICTION,
   type ManeuverPlanSampler
 } from './feasibility';
+import type { ManeuverPhysicalSample } from './feasibility';
 import {
+  racecraftFamilyDynamics,
   racecraftFamilyStateAt as computeLaneStateAt,
+  writePreparedRacecraftFamilyKinematicsAt,
+  writePreparedRacecraftFamilyStateAt,
+  type RacecraftFamilyDynamics,
   type RacecraftFamilyState as LaneState
 } from './family-geometry';
 import {
@@ -118,7 +146,7 @@ import {
   oneIntervalPhysicalDivergence
 } from './paths';
 import {
-  sampleCompactPathPlanOffset,
+  compileCompactLateralProgram,
   sampleCompactPathPlanOffsetAnalytic
 } from './compact-path';
 import {
@@ -136,6 +164,33 @@ import {
   UTILIZATION_MISTAKE_LIFT_SECONDS,
   utilizationMistakeProbability
 } from './utilization';
+import {
+  composeRacecraftStagedAttackProgram
+} from './longitudinal-program';
+import {
+  plannedNearRubExposureCost,
+  type NearRubTrajectorySample
+} from './near-rub';
+import {
+  authorCornerOwnershipAssertion,
+  classifyCornerOwnership,
+  continuousTrajectoryStateAtTime,
+  trajectoryFromPublication,
+  type RacecraftTrajectory
+} from './corner-ownership';
+import {
+  recordRacecraftDefensiveCandidateRejection,
+  recordRacecraftNestedResponseEvaluation
+} from './diagnostics';
+import {
+  defensiveContactEpisodeIsAuthorized,
+  evaluateRacecraftDefensiveLegality,
+  racecraftCandidateMayAuthorCornerOwnership,
+  racecraftDefensiveCommitmentIsActive,
+  racecraftDefensiveLegalityAuthorizesReclaim,
+  racecraftMeasuredLegalAlongside,
+  type RacecraftDefensiveLegalityResult
+} from './defensive-legality';
 
 export const MAX_RACECRAFT_CANDIDATES = 6;
 const DECISION_LOG_LIMIT = 32_768;
@@ -156,6 +211,7 @@ function evaluatorWork(
       candidateFamilyBuilds: 0,
       candidateSeedsBuilt: 0,
       seedEvaluations: 0,
+      branchBoundPrunes: 0,
       speedLawSamples: 0,
       terminalContinuationCalls: 0,
       terminalContinuationSteps: 0,
@@ -166,15 +222,10 @@ function evaluatorWork(
       viabilityCalls: 0,
       viabilityHazards: 0,
       deterministicSweeps: 0,
-      arrivalFamilyBuilds: 0,
-      arrivalFamilyCacheHits: 0,
-      tieBandHazardEvaluations: 0,
       rivalStateBuilds: 0,
       rivalStateCacheHits: 0,
       rivalSweepBuilds: 0,
-      rivalSweepCacheHits: 0,
-      rivalContinuationBuilds: 0,
-      rivalContinuationCacheHits: 0
+      rivalSweepCacheHits: 0
     });
 }
 
@@ -186,88 +237,290 @@ interface ProgramStation {
   speed: number;
   /** Predicted body orientation relative to the local track tangent. */
   headingOffsetRadians: number;
+  /** Immutable analytic state already evaluated at this exact progress. */
+  familyState?: LaneState;
 }
 
-export interface RacecraftOptimalProgramStation {
-  time: number;
-  progress: number;
-  s: number;
-  lateral: number;
-  speed: number;
-  /** Predicted body orientation relative to the local track tangent. */
-  headingOffsetRadians: number;
-}
-
-export interface RacecraftOptimalProgram {
-  kind: RacecraftCandidateKind;
-  plan: PathPlan;
-  slowPointOwnerCode: string | null;
-  candidateCount: number;
-  stations: readonly RacecraftOptimalProgramStation[];
+interface ActionableOwnershipAssertion {
+  readonly assertion: RacecraftCornerOwnershipAssertion;
 }
 
 interface CandidateProgram {
   evaluation: RacecraftCandidateEvaluation;
   stations: ProgramStation[];
   speedLaw: CandidateSpeedLaw;
-  emergencyHazards: Map<string, number>;
-  perturbations: Map<string, {
-    base: number;
-    billSeconds: number;
-    recourseSeconds: number;
-    bindingStationIndex: number;
-  }>;
-  bounds: Map<string, RelativePointStation[] | null>;
-  positionGains: Map<string, boolean>;
-  authoredExtensions: Map<number, ProgramStation[]>;
+  bounds: Map<string, RelativePointStation[] | null> | null;
+  positionGains: Map<string, boolean> | null;
+  authoredExtensions: Map<number, ProgramStation[]> | null;
   evaluationClaims: EvaluationClaimMap;
+  ownershipAssertion: RacecraftCornerOwnershipAssertion | null;
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[];
+  defenderReclaim: boolean;
+  defensiveLegality: RacecraftDefensiveLegalityResult | null;
   /** Integral of grip utilization over the authored rollout. */
   utilizationExposureSeconds: number;
   utilizationExposure: Array<{
     time: number;
     cumulativeSeconds: number;
   }>;
-}
-
-interface StandingDecisionEvaluation {
-  at: number;
-  session: Session;
-  entry: ActiveEntry;
-  entries: ActiveEntry[];
-  evaluationClaims: EvaluationClaimMap;
-  programs: CandidateProgram[];
-  hazards: Hazard[];
-  selected: CandidateProgram | null;
+  fullyScored: boolean;
+  branchBounded: boolean;
+  effortRiskComputed: boolean;
 }
 
 interface CandidateSpeedLaw {
-  progress: number[];
-  speed: number[];
+  envelope: SpeedEnvelope;
   brakingEffort: number;
   slowPoint: EntryTrafficSlowPoint | null;
+  longitudinalOwnerCode: string | null;
+  stagedClearanceProgressMetres: number | null;
+  stagedClearanceSeconds: number | null;
+  stagedConstrainedSeconds: number;
+  stagedPublicationMissing: boolean;
 }
 
-export interface RacecraftDeferredResponseSummary {
-  kind: RacecraftCandidateKind;
-  planKey: string;
-  lineBlend: number | null;
-  targetLateral: number;
-  surfaceAuthorization: 'normal' | 'emergency';
-  feasible: boolean;
+interface CandidateEvaluationWorkspace {
+  speedLawReferences: CandidateSpeedLawReference[];
+  rejectedSpeedLaw: CandidateSpeedLaw | null;
+  rejectedStations: ProgramStation[] | null;
+  towGridCache: CandidateTowRivalGridCache | null;
+  towPublishedStatesByTime: Map<number, CandidateTowPublishedStates>;
+  towPublishedStateBuffers: CandidateTowPublishedStates[];
+  towPublishedStateUsed: number;
+  speedConstructionBuffers: CandidateSpeedConstructionBuffer[];
+  speedConstructionUsed: number;
 }
 
-export interface RacecraftEmergencyResponseSummary {
-  direction: -1 | 1;
-  targetLateral: number;
+interface CandidateSpeedConstructionBuffer {
+  speed: number[];
+  source: Array<EntryTrafficSlowPoint | null>;
+  envelope: SpeedEnvelopeConstructionBuffers;
+}
+
+interface CandidateSpeedLawReference {
+  brakingEffort: number;
+  ownerCode: string | null;
+  idealAfterProgress: number;
+  speed: number[];
+  source: Array<EntryTrafficSlowPoint | null>;
+}
+
+interface CandidateSpatialStateScratch {
+  plan: PathPlan | null;
+  program: CompactLateralProgram | null;
+  dynamics: RacecraftFamilyDynamics | null;
+  startProgress: number;
+  startIndex: number;
+  valid: Uint8Array;
+  idealValid: Uint8Array;
+  idealValue: Float64Array;
+  idealFirstDerivative: Float64Array;
+  idealSecondDerivative: Float64Array;
+  lateral: Float64Array;
+  curvature: Float64Array;
+  q: Float64Array;
+  capabilitySpeed: Float64Array;
+  dynamicMu: Float64Array;
+  surfaceRoad: Float64Array;
+  surfaceCurb: Float64Array;
+  surfaceGrass: Float64Array;
+  surfaceMu: Float64Array;
+  surfaceDrag: Float64Array;
+  targetSpeed: Float64Array;
+}
+
+interface CandidateSpatialStateScratches {
+  working: CandidateSpatialStateScratch;
+  retained: CandidateSpatialStateScratch;
+}
+
+const candidateSpatialStateScratchesByEntry =
+  new WeakMap<Entry, CandidateSpatialStateScratches>();
+const retainedCandidateSpatialPlanByEntry = new WeakMap<Entry, PathPlan>();
+const candidatePhysicalPlanByPlan = new WeakMap<PathPlan, PathPlan>();
+const candidateFamilyStateScratch: LaneState = {
+  lateral: 0,
+  curvature: 0,
+  q: 0,
+  headingOffsetRadians: 0,
+  capabilitySpeed: 0,
+  targetSpeed: 0,
+  dynamicMu: 0,
+  surfaceRoad: 0,
+  surfaceCurb: 0,
+  surfaceGrass: 0,
+  surfaceMu: 0,
+  surfaceDrag: 0
+};
+const candidateLateralPoseScratch = {
+  lateralMetres: 0,
+  headingOffsetRadians: 0
+};
+const candidateIdealSampleScratch: CompactLateralSample = {
+  value: 0,
+  firstDerivative: 0,
+  secondDerivative: 0
+};
+const lambdaIdealSampleScratch: CompactLateralSample = {
+  value: 0,
+  firstDerivative: 0,
+  secondDerivative: 0
+};
+const lambdaFullSampleScratch: CompactLateralSample = {
+  value: 0,
+  firstDerivative: 0,
+  secondDerivative: 0
+};
+const ownTimeGeometryScratch = {
+  lateral: 0,
+  curvature: 0,
+  q: 0,
+  headingOffsetRadians: 0
+};
+
+function createCandidateSpatialStateScratch(
+  ideal?: CandidateSpatialStateScratch
+): CandidateSpatialStateScratch {
+  return {
+      plan: null,
+      program: null,
+      dynamics: null,
+      startProgress: 0,
+      startIndex: 0,
+      valid: new Uint8Array(LANE_BUFFER_CAPACITY),
+      idealValid: ideal?.idealValid ??
+        new Uint8Array(LANE_BUFFER_CAPACITY),
+      idealValue: ideal?.idealValue ??
+        new Float64Array(LANE_BUFFER_CAPACITY),
+      idealFirstDerivative: ideal?.idealFirstDerivative ??
+        new Float64Array(LANE_BUFFER_CAPACITY),
+      idealSecondDerivative: ideal?.idealSecondDerivative ??
+        new Float64Array(LANE_BUFFER_CAPACITY),
+      lateral: new Float64Array(LANE_BUFFER_CAPACITY),
+      curvature: new Float64Array(LANE_BUFFER_CAPACITY),
+      q: new Float64Array(LANE_BUFFER_CAPACITY),
+      capabilitySpeed: new Float64Array(LANE_BUFFER_CAPACITY),
+      dynamicMu: new Float64Array(LANE_BUFFER_CAPACITY),
+      surfaceRoad: new Float64Array(LANE_BUFFER_CAPACITY),
+      surfaceCurb: new Float64Array(LANE_BUFFER_CAPACITY),
+      surfaceGrass: new Float64Array(LANE_BUFFER_CAPACITY),
+      surfaceMu: new Float64Array(LANE_BUFFER_CAPACITY),
+      surfaceDrag: new Float64Array(LANE_BUFFER_CAPACITY),
+      targetSpeed: new Float64Array(LANE_BUFFER_CAPACITY)
+  };
+}
+
+function candidateSpatialStateScratches(
+  entry: Entry
+): CandidateSpatialStateScratches {
+  let scratches = candidateSpatialStateScratchesByEntry.get(entry);
+  if (!scratches) {
+    const working = createCandidateSpatialStateScratch();
+    scratches = {
+      working,
+      retained: createCandidateSpatialStateScratch(working)
+    };
+    candidateSpatialStateScratchesByEntry.set(entry, scratches);
+  }
+  return scratches;
+}
+
+function candidatePhysicalPlan(plan: PathPlan): PathPlan {
+  return candidatePhysicalPlanByPlan.get(plan) ?? plan;
+}
+
+function prepareCandidateSpatialState(
+  session: Session,
+  entry: ActiveEntry,
+  plan: PathPlan
+): CandidateSpatialStateScratch {
+  const physicalPlan = candidatePhysicalPlan(plan);
+  const scratches = candidateSpatialStateScratches(entry);
+  const retainedPlan = retainedCandidateSpatialPlanByEntry.get(entry);
+  const spatial = physicalPlan === retainedPlan
+    ? scratches.retained
+    : scratches.working;
+  const other = spatial === scratches.retained
+    ? scratches.working
+    : scratches.retained;
+  if (spatial.startProgress !== entry.prog) {
+    if (other.startProgress !== entry.prog)
+      spatial.idealValid.fill(0);
+    spatial.startProgress = entry.prog;
+    spatial.valid.fill(0);
+  }
+  if (spatial.plan !== physicalPlan) {
+    spatial.plan = physicalPlan;
+    if (physicalPlan.mode === 'pit')
+      throw new Error('Pit authority cannot enter candidate spatial state');
+    spatial.program = entry.racecraftPathPlan === physicalPlan &&
+        entry.racecraftLateralProgram
+      ? entry.racecraftLateralProgram
+      : compileCompactLateralProgram(session.trk, physicalPlan);
+    spatial.valid.fill(0);
+  }
+  spatial.dynamics = racecraftFamilyDynamics(session, entry);
+  spatial.startIndex = cyclicIndex(session.trk, entry.car.progIdx);
+  return spatial;
+}
+
+function writeCandidateSpatialStateSlot(
+  session: Session,
+  entry: ActiveEntry,
+  spatial: CandidateSpatialStateScratch,
+  slot: number,
+  progress: number
+): void {
+  if (!spatial.idealValid[slot]) {
+    const ideal = writeTrackIdealLateralAnalytic(
+      session.trk,
+      progress,
+      candidateIdealSampleScratch
+    );
+    spatial.idealValue[slot] = ideal.value;
+    spatial.idealFirstDerivative[slot] = ideal.firstDerivative;
+    spatial.idealSecondDerivative[slot] = ideal.secondDerivative;
+    spatial.idealValid[slot] = 1;
+  }
+  candidateIdealSampleScratch.value = spatial.idealValue[slot]!;
+  candidateIdealSampleScratch.firstDerivative =
+    spatial.idealFirstDerivative[slot]!;
+  candidateIdealSampleScratch.secondDerivative =
+    spatial.idealSecondDerivative[slot]!;
+  const program = spatial.program;
+  const dynamics = spatial.dynamics;
+  if (!program || !dynamics)
+    throw new Error('Candidate spatial state was not prepared');
+  const state = writePreparedRacecraftFamilyKinematicsAt(
+    session.trk,
+    progress,
+    (spatial.startIndex + slot) % session.trk.n,
+    program,
+    dynamics,
+    candidateFamilyStateScratch,
+    candidateIdealSampleScratch
+  );
+  spatial.lateral[slot] = state.lateral;
+  spatial.curvature[slot] = state.curvature;
+  spatial.q[slot] = state.q;
+  spatial.capabilitySpeed[slot] = state.capabilitySpeed;
+  spatial.dynamicMu[slot] = state.dynamicMu;
+  spatial.surfaceRoad[slot] = state.surfaceRoad;
+  spatial.surfaceCurb[slot] = state.surfaceCurb;
+  spatial.surfaceGrass[slot] = state.surfaceGrass;
+  spatial.surfaceMu[slot] = state.surfaceMu;
+  spatial.surfaceDrag[slot] = state.surfaceDrag;
+  spatial.targetSpeed[slot] = state.targetSpeed;
+  spatial.valid[slot] = 1;
 }
 
 type EvaluationClaimMap = ReadonlyMap<string, RacecraftEvaluationClaim>;
 const EMPTY_EVALUATION_CLAIMS: EvaluationClaimMap = new Map();
+const EMPTY_OWNERSHIP_VIEWS: readonly ActionableOwnershipAssertion[] = [];
 
 export interface RacecraftContestedRegion {
-  index: number;
-  s: number;
-  time: number;
+  readonly sMetres: number;
+  readonly sessionTimeSeconds: number;
 }
 
 interface Hazard {
@@ -278,23 +531,11 @@ interface Hazard {
   originS: number;
   originLateral: number;
   originHeadingOffsetRadians: number;
-  ownClaim: RacecraftClaim | null;
-  /** First overlap of the two immutable snapshot programs, if one exists. */
-  region: RacecraftContestedRegion | null | undefined;
-  /** Snapshot-derived and candidate-independent within this deliberation. */
-  adaptResponsibility: number | null;
   /** Fixed world geometry for the immutable rival publication. */
   rivalSweepGeometry: {
     origin: WorldBodyPose;
     stations: WorldBodyPose[];
   } | null;
-  bestPlanContinuation: {
-    plan: PathPlan;
-    speedLaw: CandidateSpeedLaw;
-    stations: ProgramStation[];
-    evaluationClaims: EvaluationClaimMap;
-  } | null;
-  bestPlanContinuationResolved: boolean;
 }
 
 interface SweptContact {
@@ -302,39 +543,32 @@ interface SweptContact {
   egoProgress: number;
   egoSpeed: number;
   maximumRelativeNormalSpeed: number;
-  stationIndex: number;
   episodes: readonly SweptCarContactEpisode[];
 }
 
 interface HazardCost {
   seconds: number;
   billSeconds: number;
-  recourseSeconds: number;
-  bindingStationIndex: number;
 }
 
 interface HazardClearance {
-  stationIndex: number;
   clearanceMetres: number;
 }
+
+type MutableNearRubTrajectorySample = {
+  -readonly [Key in keyof NearRubTrajectorySample]:
+    NearRubTrajectorySample[Key];
+};
 
 interface ScoreProgramsScratch {
   hazards: Hazard[];
   stations: Array<RelativePointStation[] | null>;
   clearances: Array<HazardClearance | null>;
+  nearRubSamples: MutableNearRubTrajectorySample[];
 }
 
 const scoreProgramsScratchBySession =
   new WeakMap<Session, ScoreProgramsScratch>();
-
-interface HazardResponseOption {
-  q: number | null;
-  qLowerBound: number;
-  waitSlack: number;
-  emergency: boolean;
-  order: number;
-  unresolvedContacts: SweptContact[] | null;
-}
 
 interface RuntimePairEconomics {
   lastAt: number;
@@ -364,8 +598,6 @@ const observedBattleContextsByEntry =
   new WeakMap<Entry, Map<string, BattleEconomicsContext>>();
 const selectedBattleStatesByEntry =
   new WeakMap<Entry, Set<RuntimePairEconomics>>();
-const standingDecisionEvaluations =
-  new WeakMap<RacecraftDecision, StandingDecisionEvaluation>();
 const planNumericIds = new WeakMap<PathPlan, number>();
 let nextPlanNumericId = 1;
 interface FamilyIdentityInterner {
@@ -375,21 +607,122 @@ interface FamilyIdentityInterner {
 const familyIdentityBySession =
   new WeakMap<Session, FamilyIdentityInterner>();
 
-interface CandidateTowRivalSnapshot {
-  code: string | null;
-  downstream: number;
-  lateral: number;
+interface CandidateTowRivalGridCache {
+  computed: Uint8Array;
+  hasNearest: Uint8Array;
+  downstream: Float64Array;
+  lateral: Float64Array;
 }
 
-const candidateTowRivalSnapshots = new WeakMap<
+const candidateEvaluationWorkspaceByEntry =
+  new WeakMap<Entry, CandidateEvaluationWorkspace>();
+
+function prepareCandidateEvaluationWorkspace(
+  entry: Entry
+): CandidateEvaluationWorkspace {
+  let workspace = candidateEvaluationWorkspaceByEntry.get(entry);
+  if (!workspace) {
+    workspace = {
+      speedLawReferences: [],
+      rejectedSpeedLaw: null,
+      rejectedStations: null,
+      towGridCache: null,
+      towPublishedStatesByTime: new Map(),
+      towPublishedStateBuffers: [],
+      towPublishedStateUsed: 0,
+      speedConstructionBuffers: [],
+      speedConstructionUsed: 0
+    };
+    candidateEvaluationWorkspaceByEntry.set(entry, workspace);
+    return workspace;
+  }
+  workspace.speedLawReferences.length = 0;
+  workspace.rejectedSpeedLaw = null;
+  workspace.rejectedStations = null;
+  workspace.towPublishedStatesByTime.clear();
+  workspace.towPublishedStateUsed = 0;
+  workspace.speedConstructionUsed = 0;
+  workspace.towGridCache?.computed.fill(0);
+  return workspace;
+}
+
+function candidateSpeedConstructionBuffer(
+  workspace: CandidateEvaluationWorkspace,
+  count: number
+): CandidateSpeedConstructionBuffer {
+  const index = workspace.speedConstructionUsed++;
+  let buffer = workspace.speedConstructionBuffers[index];
+  if (!buffer) {
+    buffer = {
+      speed: new Array<number>(count),
+      source: new Array<EntryTrafficSlowPoint | null>(count),
+      envelope: createSpeedEnvelopeConstructionBuffers(count - 1)
+    };
+    workspace.speedConstructionBuffers[index] = buffer;
+    return buffer;
+  }
+  if (buffer.speed.length !== count) {
+    buffer.speed = new Array<number>(count);
+    buffer.source = new Array<EntryTrafficSlowPoint | null>(count);
+    buffer.envelope = createSpeedEnvelopeConstructionBuffers(count - 1);
+  }
+  return buffer;
+}
+
+interface CandidateTowPublishedStates {
+  count: number;
+  s: Float64Array;
+  lateral: Float64Array;
+}
+
+const candidateTowPublishedStates = new WeakMap<
   EvaluationClaimMap,
-  WeakMap<ActiveEntry, Map<number, CandidateTowRivalSnapshot>>
+  Map<number, CandidateTowPublishedStates>
 >();
+const candidateTowWorkspaceByClaims = new WeakMap<
+  EvaluationClaimMap,
+  CandidateEvaluationWorkspace
+>();
+const candidateTowClaimViews = new WeakMap<
+  EvaluationClaimMap,
+  RacecraftEvaluationClaim[]
+>();
+
+function candidateTowClaimViewsFor(
+  entry: ActiveEntry,
+  evaluationClaims: EvaluationClaimMap
+): readonly RacecraftEvaluationClaim[] {
+  let views = candidateTowClaimViews.get(evaluationClaims);
+  if (views) return views;
+  views = [];
+  for (const [code, view] of evaluationClaims)
+    if (code !== entry.code) views.push(view);
+  views.sort((left, right) =>
+    left.claim.code.localeCompare(right.claim.code));
+  candidateTowClaimViews.set(evaluationClaims, views);
+  return views;
+}
+
+function bindCandidateTowWorkspace(
+  evaluationClaims: EvaluationClaimMap,
+  workspace: CandidateEvaluationWorkspace
+): void {
+  candidateTowPublishedStates.set(
+    evaluationClaims,
+    workspace.towPublishedStatesByTime
+  );
+  candidateTowWorkspaceByClaims.set(evaluationClaims, workspace);
+}
 const candidateTowStateScratch: RacecraftClaimState = {
+  progressMetres: 0,
   s: 0,
   lateral: 0,
   speed: 0,
   headingOffsetRadians: 0
+};
+const candidateTowLateralStateScratch: RacecraftClaimTowState = {
+  s: 0,
+  lateral: 0
 };
 const programStationScratchA: ProgramStation = {
   time: 0,
@@ -399,29 +732,6 @@ const programStationScratchA: ProgramStation = {
   speed: 0,
   headingOffsetRadians: 0
 };
-const programStationScratchB: ProgramStation = {
-  time: 0,
-  progress: 0,
-  s: 0,
-  lateral: 0,
-  speed: 0,
-  headingOffsetRadians: 0
-};
-
-type BestPlanContinuation =
-  NonNullable<Hazard['bestPlanContinuation']>;
-
-interface CachedBestPlanContinuation {
-  session: Session;
-  other: ActiveEntry;
-  publishedAt: number;
-  publicationRevision: number;
-  predictionKey: string;
-  value: BestPlanContinuation | null;
-}
-
-const bestPlanContinuationByClaim =
-  new WeakMap<RacecraftClaim, CachedBestPlanContinuation>();
 interface CachedRivalSweepGeometry {
   track: Track;
   publishedAt: number;
@@ -431,74 +741,6 @@ interface CachedRivalSweepGeometry {
 }
 const rivalSweepGeometryByClaim =
   new WeakMap<RacecraftClaim, CachedRivalSweepGeometry>();
-
-function cloneBestPlanContinuation(
-  value: BestPlanContinuation
-): BestPlanContinuation {
-  return {
-    plan: value.plan,
-    speedLaw: value.speedLaw,
-    stations: value.stations.map(station => ({ ...station })),
-    evaluationClaims: value.evaluationClaims
-  };
-}
-
-function freezeActiveEntry(entry: ActiveEntry): ActiveEntry {
-  return {
-    ...entry,
-    car: { ...entry.car },
-    tyre: { ...entry.tyre },
-    rel: { ...entry.rel },
-    wearAcc: { ...entry.wearAcc },
-    inp: { ...entry.inp },
-    mods: { ...entry.mods },
-    flow: entry.flow ? [...entry.flow] : null,
-    lineBiasByCorner: entry.lineBiasByCorner
-      ? { ...entry.lineBiasByCorner }
-      : null,
-    racecraftLongitudinalProgram: entry.racecraftLongitudinalProgram
-      ? {
-          ...entry.racecraftLongitudinalProgram,
-          progress: [...entry.racecraftLongitudinalProgram.progress],
-          speed: [...entry.racecraftLongitudinalProgram.speed]
-        }
-      : null,
-    laneProgram: {
-      ...entry.laneProgram,
-      points: entry.laneProgram.points.map(point => ({ ...point }))
-    }
-  };
-}
-
-function freezeStandingSession(
-  session: Session,
-  entries: ActiveEntry[]
-): Session {
-  const frozen = {
-    ...session,
-    entries,
-    events: []
-  } as Session;
-  if (session.racecraftClaims)
-    frozen.racecraftClaims = new Map(session.racecraftClaims);
-  else delete frozen.racecraftClaims;
-  if (session.sideAgreements)
-    frozen.sideAgreements = new Map(
-      [...session.sideAgreements].map(([key, agreement]) => [
-        key,
-        {
-          ...agreement,
-          familyCertificate: { ...agreement.familyCertificate }
-        }
-      ])
-    );
-  else delete frozen.sideAgreements;
-  const familyInterner = familyIdentityBySession.get(session);
-  if (familyInterner)
-    familyIdentityBySession.set(frozen, familyInterner);
-  delete frozen.racecraftEvaluatorWork;
-  return frozen;
-}
 
 function reconcileBattleOpportunityObservations(
   session: Session,
@@ -542,50 +784,16 @@ function commitBattleEconomicsSelection(
   selectedBattleStatesByEntry.set(entry, active);
 }
 
-interface CachedEvaluatorDynamics {
-  session: Session;
-  at: number;
-  baseMu: number;
-  downforceScale: number;
-  modifiers: ReturnType<typeof entryMods>;
-  margin: number;
-}
-
-const evaluatorDynamicsCache = new WeakMap<Entry, CachedEvaluatorDynamics>();
-const evaluatorLaneStateCache = new WeakMap<Entry, {
-  session: Session;
-  at: number;
-  plans: Map<PathPlan, Map<number, LaneState>>;
-}>();
 function evaluatorDynamics(
   session: Session,
   entry: Entry
-): CachedEvaluatorDynamics {
-  const cached = evaluatorDynamicsCache.get(entry);
-  if (Number.isFinite(session.t) &&
-      cached?.session === session &&
-      cached.at === session.t)
-    return cached;
-  const baseMu = entryMu(entry, session.wet);
-  const value = {
+): RacecraftFamilyDynamics {
+  if (!entry.car)
+    throw new Error('Racecraft dynamics require an active car');
+  return racecraftFamilyDynamics(
     session,
-    at: session.t,
-    baseMu,
-    downforceScale: entryDownforceScale(entry),
-    modifiers: entryMods(entry, session.wet, baseMu),
-    margin: clamp(
-      entryMargin(
-        entry,
-        session,
-        session.config.tuneBonus,
-        session.wet
-      ) + flowOff(entry, session),
-      0.85,
-      0.985
-    )
-  };
-  if (Number.isFinite(session.t)) evaluatorDynamicsCache.set(entry, value);
-  return value;
+    entry as ActiveEntry
+  );
 }
 
 function laneStateAt(
@@ -602,30 +810,73 @@ function laneStateAt(
         progress > terminalProgress + Number.EPSILON)
       effectivePlan = IDEAL_PATH_PLAN;
   }
-  let cache = evaluatorLaneStateCache.get(entry);
-  if (!cache || cache.session !== session || cache.at !== session.t) {
-    cache = {
-      session,
-      at: session.t,
-      plans: new Map()
-    };
-    evaluatorLaneStateCache.set(entry, cache);
-  }
-  let states = cache.plans.get(effectivePlan);
-  if (!states) {
-    states = new Map();
-    cache.plans.set(effectivePlan, states);
-  }
-  const existing = states.get(progress);
-  if (existing) return existing;
-  const state = computeLaneStateAt(
+  return computeLaneStateAt(
     session,
     entry,
     progress,
     effectivePlan
   );
-  states.set(progress, state);
-  return state;
+}
+
+interface PreparedLaneStateProgram {
+  authored: CompactLateralProgram;
+  ideal: CompactLateralProgram;
+  terminalProgress: number | null;
+  dynamics: RacecraftFamilyDynamics;
+}
+
+function prepareLaneStateProgram(
+  session: Session,
+  entry: ActiveEntry,
+  plan: PathPlan
+): PreparedLaneStateProgram {
+  if (plan.mode === 'pit')
+    throw new Error('Sampled pit paths have no compact family state');
+  const authored = compileCompactLateralProgram(session.trk, plan);
+  const terminalProgress = plan.mode === 'ideal' ||
+      plan.lineTerminal === 'sustained-offset'
+    ? null
+    : plan.anchors.at(-1)?.s ?? null;
+  return {
+    authored,
+    ideal: terminalProgress == null
+      ? authored
+      : compileCompactLateralProgram(session.trk, IDEAL_PATH_PLAN),
+    terminalProgress,
+    dynamics: evaluatorDynamics(session, entry)
+  };
+}
+
+function preparedLaneStateAt(
+  session: Session,
+  entry: ActiveEntry,
+  progress: number,
+  prepared: PreparedLaneStateProgram
+): LaneState {
+  return writePreparedRacecraftFamilyStateAt(
+    session.trk,
+    progress,
+    indexAtProgress(session.trk, entry, progress),
+    prepared.terminalProgress != null &&
+        progress > prepared.terminalProgress + Number.EPSILON
+      ? prepared.ideal
+      : prepared.authored,
+    prepared.dynamics,
+    {
+      lateral: 0,
+      curvature: 0,
+      q: 0,
+      headingOffsetRadians: 0,
+      capabilitySpeed: 0,
+      targetSpeed: 0,
+      dynamicMu: 0,
+      surfaceRoad: 0,
+      surfaceCurb: 0,
+      surfaceGrass: 0,
+      surfaceMu: 0,
+      surfaceDrag: 0
+    }
+  );
 }
 
 function cyclicIndex(track: Track, index: number): number {
@@ -647,43 +898,152 @@ interface EvaluatorManeuverSamplerContext {
   session: Session;
   entry: ActiveEntry;
   plan: PathPlan;
-  states: Map<number, LaneState>;
+  program: CompactLateralProgram | null;
+  dynamics: RacecraftFamilyDynamics | null;
+  stateSlots: Int32Array;
+  stateStamps: Uint32Array;
+  stateGeneration: number;
+  statePool: LaneState[];
+  stateUsed: number;
+  spatial: CandidateSpatialStateScratch | null;
   diagnostic: ManeuverCandidateDiagnostic | undefined;
 }
 
 const evaluatorManeuverSamplerContexts =
   new WeakMap<ActiveEntry, EvaluatorManeuverSamplerContext>();
 
+function evaluatorManeuverProgressAt(
+  context: EvaluatorManeuverSamplerContext,
+  index: number
+): number {
+  const start = cyclicIndex(
+    context.session.trk,
+    context.entry.car.progIdx
+  );
+  return context.entry.prog + distanceAhead(
+    context.session.trk,
+    start,
+    cyclicIndex(context.session.trk, index)
+  );
+}
+
+function evaluatorSpatialSlotAt(
+  context: EvaluatorManeuverSamplerContext,
+  progress: number
+): number {
+  const spatial = context.spatial;
+  if (!spatial || spatial.plan !== candidatePhysicalPlan(context.plan))
+    return -1;
+  const raw = (progress - spatial.startProgress) /
+    context.session.trk.step;
+  const slot = Math.round(raw);
+  if (slot < 0 || slot >= LANE_BUFFER_CAPACITY ||
+      Math.abs(raw - slot) > Number.EPSILON *
+        Math.max(1, Math.abs(raw)) * 8)
+    return -1;
+  return slot;
+}
+
+function evaluatorEnsureSpatialSlot(
+  context: EvaluatorManeuverSamplerContext,
+  progress: number
+): number {
+  const slot = evaluatorSpatialSlotAt(context, progress);
+  if (slot < 0) return -1;
+  const spatial = context.spatial!;
+  if (!spatial.valid[slot]) {
+    if (context.plan.mode === 'pit') return -1;
+    writeCandidateSpatialStateSlot(
+      context.session,
+      context.entry,
+      spatial,
+      slot,
+      progress
+    );
+  }
+  return slot;
+}
+
 function evaluatorManeuverStateAt(
   context: EvaluatorManeuverSamplerContext,
   index: number
 ): LaneState {
   const wrapped = cyclicIndex(context.session.trk, index);
-  const cached = context.states.get(wrapped);
-  if (cached) return cached;
-  const start = cyclicIndex(
+  if (context.stateStamps[wrapped] === context.stateGeneration)
+    return context.statePool[context.stateSlots[wrapped]!]!;
+  const progress = evaluatorManeuverProgressAt(context, wrapped);
+  const program = context.program;
+  const dynamics = context.dynamics;
+  if (!program || !dynamics)
+    throw new Error('Maneuver sampler state was not prepared');
+  const slot = context.stateUsed++;
+  const state = context.statePool[slot] ??
+    (context.statePool[slot] = {
+      lateral: 0,
+      curvature: 0,
+      q: 0,
+      headingOffsetRadians: 0,
+      capabilitySpeed: 0,
+      targetSpeed: 0,
+      dynamicMu: 0,
+      surfaceRoad: 0,
+      surfaceCurb: 0,
+      surfaceGrass: 0,
+      surfaceMu: 0,
+      surfaceDrag: 0
+    });
+  writePreparedRacecraftFamilyStateAt(
     context.session.trk,
-    context.entry.car.progIdx
-  );
-  const progress = context.entry.prog +
-    distanceAhead(context.session.trk, start, wrapped);
-  const state = laneStateAt(
-    context.session,
-    context.entry,
     progress,
-    context.plan
+    wrapped,
+    program,
+    dynamics,
+    state
   );
-  context.states.set(wrapped, state);
+  context.stateSlots[wrapped] = slot;
+  context.stateStamps[wrapped] = context.stateGeneration;
   return state;
 }
 
 const EVALUATOR_MANEUVER_SAMPLER:
   ManeuverPlanSampler<EvaluatorManeuverSamplerContext> = {
     lateralAt(context, index) {
+      const progress = evaluatorManeuverProgressAt(context, index);
+      const slot = evaluatorEnsureSpatialSlot(context, progress);
+      if (slot >= 0) return context.spatial!.lateral[slot]!;
       return evaluatorManeuverStateAt(context, index).lateral;
     },
     curvatureAt(context, index) {
+      const progress = evaluatorManeuverProgressAt(context, index);
+      const slot = evaluatorEnsureSpatialSlot(context, progress);
+      if (slot >= 0) return context.spatial!.curvature[slot]!;
       return evaluatorManeuverStateAt(context, index).curvature;
+    },
+    writePhysicalSample(context, index, out: ManeuverPhysicalSample) {
+      const progress = evaluatorManeuverProgressAt(context, index);
+      const slot = evaluatorEnsureSpatialSlot(context, progress);
+      if (slot < 0) {
+        const state = evaluatorManeuverStateAt(context, index);
+        out.lateral = state.lateral;
+        out.curvature = state.curvature;
+        out.capabilitySpeed = state.capabilitySpeed;
+        out.dynamicMu = state.dynamicMu;
+        out.road = state.surfaceRoad;
+        out.curb = state.surfaceCurb;
+        out.grass = state.surfaceGrass;
+        out.mu = state.surfaceMu;
+        return out;
+      }
+      const spatial = context.spatial!;
+      out.lateral = spatial.lateral[slot]!;
+      out.curvature = spatial.curvature[slot]!;
+      out.capabilitySpeed = spatial.capabilitySpeed[slot]!;
+      out.dynamicMu = spatial.dynamicMu[slot]!;
+      out.road = spatial.surfaceRoad[slot]!;
+      out.curb = spatial.surfaceCurb[slot]!;
+      out.grass = spatial.surfaceGrass[slot]!;
+      out.mu = spatial.surfaceMu[slot]!;
+      return out;
     }
   };
 
@@ -734,41 +1094,99 @@ function activeLeader(
 function activeDefensiveAttacker(
   session: Session,
   defender: ActiveEntry,
-  entries: readonly Entry[]
+  entries: readonly Entry[],
+  actionableOwnershipViews:
+    readonly ActionableOwnershipAssertion[] = EMPTY_OWNERSHIP_VIEWS
 ): {
   entry: ActiveEntry;
   distance: number;
-  selected: RacecraftCandidateEvaluation;
+  claim: RacecraftClaim;
+  side: -1 | 1;
 } | null {
   let nearest: {
     entry: ActiveEntry;
     distance: number;
-    selected: RacecraftCandidateEvaluation;
+    claim: RacecraftClaim;
+    side: -1 | 1;
   } | null = null;
   for (const candidate of entries) {
     if (candidate === defender || !candidate.car ||
         candidate.state !== 'run')
       continue;
-    const distance = (
-      defender.car.s - candidate.car.s + session.trk.len
-    ) % session.trk.len;
-    if (distance <= 0 || distance > TRAFFIC_NEIGHBOR_SCAN_METRES ||
-        (nearest && distance >= nearest.distance))
+    const relative = signedTrackDistance(
+      session.trk,
+      candidate.car.s,
+      defender.car.s
+    );
+    const ownershipIncoming = actionableOwnershipViews.some(view =>
+      view.assertion.attackerCode === candidate.code &&
+      view.assertion.targetCode === defender.code);
+    if (relative < -PHYS.carLen && !ownershipIncoming) continue;
+    const distance = Math.abs(relative);
+    if (distance > TRAFFIC_NEIGHBOR_SCAN_METRES ||
+        (nearest &&
+          (
+            distance > nearest.distance + Number.EPSILON ||
+            (
+              Math.abs(distance - nearest.distance) <= Number.EPSILON &&
+              candidate.code.localeCompare(nearest.entry.code) >= 0
+            )
+          )))
       continue;
-    const selected = candidate.racecraftDecision?.candidates.find(value =>
-      value.planNumericId ===
-        candidate.racecraftDecision?.selectedPlanNumericId);
-    const targetsDefender = selected?.plan.mode !== 'ideal' &&
-      selected?.plan.mode !== 'pit' &&
-      (selected?.plan.mode === 'side-inside' ||
-        selected?.plan.mode === 'side-outside') &&
-      selected?.plan.surfaceAuthorization !== 'emergency' &&
-      selected?.plan.leaderCode === defender.code;
-    if (!targetsDefender) continue;
+    const claim = session.racecraftClaims?.get(candidate.code);
+    if (!claim || !claim.trusted ||
+        claim.mode !== 'staged-attack' ||
+        claim.targetCode !== defender.code ||
+        claim.selectedFamilyNumericId == null)
+      continue;
+    const age = Math.max(0, session.t - claim.publishedAt);
+    const horizon = racecraftClaimHorizonSeconds(claim);
+    if (age > horizon + TRAF_DT + Number.EPSILON) continue;
+    const current = racecraftClaimStateAtTime(
+      session.trk,
+      claim,
+      age
+    );
+    const defenderPublication =
+      session.racecraftClaims?.get(defender.code);
+    const defenderCurrent = defenderPublication
+      ? racecraftClaimStateAtTime(
+          session.trk,
+          defenderPublication,
+          Math.max(0, session.t - defenderPublication.publishedAt)
+        )
+      : {
+          lateral: defender.latNow
+        };
+    const futureLateral = racecraftClaimStateAtTime(
+      session.trk,
+      claim,
+      horizon
+    ).lateral;
+    const defenderFuture = defenderPublication
+      ? racecraftClaimStateAtTime(
+          session.trk,
+          defenderPublication,
+          Math.max(0, session.t - defenderPublication.publishedAt) +
+            Math.max(0, horizon - age)
+        ).lateral
+      : defender.latNow;
+    const currentRelative =
+      current.lateral - defenderCurrent.lateral;
+    const futureRelative = futureLateral - defenderFuture;
+    if (Math.abs(futureRelative - currentRelative) <= Number.EPSILON &&
+        Math.abs(currentRelative) <
+          PHYS.carWid - Number.EPSILON)
+      continue;
+    const sideValue = Math.abs(futureRelative) > Number.EPSILON
+      ? futureRelative
+      : currentRelative;
+    if (Math.abs(sideValue) <= Number.EPSILON) continue;
     nearest = {
       entry: candidate as ActiveEntry,
       distance,
-      selected
+      claim,
+      side: sideValue < 0 ? -1 : 1
     };
   }
   return nearest;
@@ -797,7 +1215,7 @@ function idealElapsedAtProgress(
   return lap * timing.lapTime + from + (to - from) * u;
 }
 
-function capabilityPaceRatio(
+export function racecraftCapabilityPaceRatio(
   session: Session,
   entry: Entry
 ): number {
@@ -833,8 +1251,8 @@ function pairEconomicsState(
       egoProgress: entry.prog,
       rivalProgress: rival.prog,
       pace: createNormalizedPairPaceEvidence(
-        capabilityPaceRatio(session, entry),
-        capabilityPaceRatio(session, rival)
+        racecraftCapabilityPaceRatio(session, entry),
+        racecraftCapabilityPaceRatio(session, rival)
       ),
       opportunity: createOpportunityIntervalEvidence(),
       activeBattleFamilyNumericId: null
@@ -858,18 +1276,29 @@ function normalAttackProgram(
 }
 
 function normalDefenseProgram(
+  session: Session,
   program: CandidateProgram,
   defender: ActiveEntry,
-  attacker: ActiveEntry
+  attackerPublication: RacecraftClaim
 ): boolean {
   const plan = program.evaluation.plan;
+  const age = Math.max(
+    0,
+    session.t - attackerPublication.publishedAt
+  );
+  const horizon = racecraftClaimHorizonSeconds(attackerPublication);
+  const attackTarget = racecraftClaimStateAtTime(
+    session.trk,
+    attackerPublication,
+    age + horizon
+  ).lateral;
   return program.evaluation.feasible &&
     plan.mode !== 'ideal' &&
     plan.mode !== 'pit' &&
     (plan.mode === 'side-inside' || plan.mode === 'side-outside') &&
     plan.surfaceAuthorization !== 'emergency' &&
-    Math.abs(program.evaluation.targetLateral - attacker.latNow) <
-      Math.abs(defender.latNow - attacker.latNow);
+    Math.abs(program.evaluation.targetLateral - attackTarget) <
+      Math.abs(defender.latNow - attackTarget);
 }
 
 function battleProgram(
@@ -887,7 +1316,7 @@ function attackProgramGainsPosition(
   program: CandidateProgram,
   hazard: Hazard
 ): boolean {
-  const cached = program.positionGains.get(hazard.key);
+  const cached = program.positionGains?.get(hazard.key);
   if (cached != null) return cached;
   const plan = program.evaluation.plan;
   const targetProgress = plan.mode !== 'ideal' && plan.mode !== 'pit'
@@ -905,7 +1334,7 @@ function attackProgramGainsPosition(
   if (targetProgress == null ||
       targetProgress - entry.prog > session.trk.len / 2 ||
       initialGap <= 0) {
-    program.positionGains.set(hazard.key, false);
+    (program.positionGains ??= new Map()).set(hazard.key, false);
     return false;
   }
   const last = program.stations.at(-1)!;
@@ -931,7 +1360,7 @@ function attackProgramGainsPosition(
     terminal.time
   );
   if (!rival) {
-    program.positionGains.set(hazard.key, false);
+    (program.positionGains ??= new Map()).set(hazard.key, false);
     return false;
   }
   const gains = signedTrackDistance(
@@ -939,7 +1368,7 @@ function attackProgramGainsPosition(
     terminal.s,
     rival.s
   ) <= 0;
-  program.positionGains.set(hazard.key, gains);
+  (program.positionGains ??= new Map()).set(hazard.key, gains);
   return gains;
 }
 
@@ -949,7 +1378,8 @@ function updateBattleEconomicsContext(
   rival: ActiveEntry,
   programs: readonly CandidateProgram[],
   hazard: Hazard,
-  role: BattleEconomicsRole
+  role: BattleEconomicsRole,
+  rivalPublication: RacecraftClaim | null = null
 ): BattleEconomicsContext {
   const state = pairEconomicsState(session, entry, rival);
   const elapsed = session.t - state.lastAt;
@@ -987,7 +1417,13 @@ function updateBattleEconomicsContext(
   const battlePrograms = programs.filter(program =>
     role === 'attack'
       ? normalAttackProgram(program, rival)
-      : normalDefenseProgram(program, entry, rival));
+      : rivalPublication != null &&
+        normalDefenseProgram(
+          session,
+          program,
+          entry,
+          rivalPublication
+        ));
   if (role === 'attack') {
     for (const program of battlePrograms)
       program.evaluation.positionGain = attackProgramGainsPosition(
@@ -1035,7 +1471,7 @@ function updateBattleEconomicsContext(
   };
 }
 
-/** Exact membership predicate shared by Tier 0 and full hazard construction. */
+/** Exact bounded-neighbor membership used by directional hazard construction. */
 export function racecraftIsInteractionNeighbor(
   session: Session,
   entry: Entry,
@@ -1122,12 +1558,16 @@ function currentLaneAt(
 ): number {
   const index = indexAtProgress(session.trk, entry, progress);
   if (entry.racecraftPathPlan)
-    return sampleCompactPathPlanOffset(
+    return writeSampleCompactLateralProgram(
       session.trk,
-      entry.racecraftPathPlan,
-      index,
-      progress
-    );
+      entry.racecraftLateralProgram ??
+        compileCompactLateralProgram(
+          session.trk,
+          entry.racecraftPathPlan
+        ),
+      progress,
+      lambdaFullSampleScratch
+    ).value;
   const eta = entry.laneProgram.points.length
     ? evaluateLaneEta(entry.laneProgram.points, progress).eta
     : entry.laneProgram.bias;
@@ -1295,15 +1735,17 @@ function fullCornerPlan(
     : family.idealRejoin;
   const start = cyclicIndex(track, entry.car.progIdx);
   const exitDistance = distanceAhead(track, start, corner.exitI);
-  const targetPoint = line.points
-    .map(point => ({
-      point,
-      distance: distanceAhead(track, start, point.index)
-    }))
-    .filter(value =>
-      value.distance > track.step / 2 &&
-      value.distance <= exitDistance)
-    .sort((a, b) => a.distance - b.distance)[0]?.point;
+  let targetPoint: (typeof line.points)[number] | null = null;
+  let targetDistance = Infinity;
+  for (let index = 0; index < line.points.length; index++) {
+    const point = line.points[index]!;
+    const distance = distanceAhead(track, start, point.index);
+    if (distance <= track.step / 2 || distance > exitDistance ||
+        distance >= targetDistance)
+      continue;
+    targetPoint = point;
+    targetDistance = distance;
+  }
   if (!targetPoint) return null;
   const targetIndex = targetPoint.index;
   const fullTarget = track.idealPath.off[targetIndex]! +
@@ -1356,16 +1798,39 @@ function fullCornerPlan(
   };
 }
 
-type LambdaInterval = [number, number];
-interface LambdaConflict {
-  ideal: number;
-  slope: number;
-  centre: number;
-  overlap: number;
+interface LambdaIntervalWorkspace {
+  from: number[];
+  to: number[];
+  nextFrom: number[];
+  nextTo: number[];
+  count: number;
 }
 interface LambdaSeed {
   lambda: number;
 }
+
+const lambdaIntervals: LambdaIntervalWorkspace = {
+  from: [],
+  to: [],
+  nextFrom: [],
+  nextTo: [],
+  count: 0
+};
+const lambdaConflictIdeal: number[] = [];
+const lambdaConflictSlope: number[] = [];
+const lambdaConflictCentre: number[] = [];
+const lambdaConflictOverlap: number[] = [];
+const lambdaBreakpoints: number[] = [];
+const stagedLambdaIdeal: number[] = [];
+const stagedLambdaDelta: number[] = [];
+const stagedLambdaLeader: number[] = [];
+const lambdaClaimStateScratch: RacecraftClaimState = {
+  progressMetres: 0,
+  s: 0,
+  lateral: 0,
+  speed: 0,
+  headingOffsetRadians: 0
+};
 
 function straightFullPlan(
   session: Session,
@@ -1490,169 +1955,6 @@ function straightFullPlan(
   };
 }
 
-/**
- * One closed-form avoidance member: the minimum constant parallel offset on
- * the requested side that clears every screened claim station. It is not an
- * arc search and has no per-station lateral freedom.
- */
-function emergencyEscapePlan(
-  session: Session,
-  entry: ActiveEntry,
-  hazards: readonly Hazard[],
-  side: -1 | 1,
-): DynamicPlan | null {
-  const track = session.trk;
-  const start = cyclicIndex(track, entry.car.progIdx);
-  let targetEta = entry.latNow - track.idealPath.off[start]!;
-  let hasConstraint = false;
-  for (const hazard of hazards) {
-    const claim = hazard.claim;
-    for (let stationIndex = 0;
-      stationIndex < claim.stations.length;
-      stationIndex++) {
-      const stationTime = claim.stations.time[stationIndex]!;
-      const stationS = claim.stations.s[stationIndex]!;
-      const egoS = (
-        entry.car.s + Math.max(0, entry.spd) * stationTime
-      ) % track.len;
-      if (Math.abs(signedTrackDistance(track, egoS, stationS)) >
-          PHYS.carLen)
-        continue;
-      const index = cyclicIndex(track, egoS / track.step);
-      const clearance = PHYS.carWid;
-      const ideal = track.idealPath.off[index]!;
-      const eta = claim.stations.y[stationIndex]! -
-        ideal + side * clearance;
-      targetEta = side < 0
-        ? Math.min(targetEta, eta)
-        : Math.max(targetEta, eta);
-      hasConstraint = true;
-    }
-  }
-  if (!hasConstraint) return null;
-  const targetNow = track.idealPath.off[start]! + targetEta;
-  const moveSeconds = physicalLaneMoveSeconds(session, entry, targetNow);
-  if (!Number.isFinite(moveSeconds)) return null;
-  const acquisitionProgress = entry.prog + Math.max(
-    PHYS.carLen,
-    entry.spd * moveSeconds
-  );
-  const holdProgress = Math.max(
-    horizonProgress(entry),
-    acquisitionProgress + track.step
-  );
-  const dynamics = evaluatorDynamics(session, entry);
-  const rejoinSeconds = physicalLateralMoveSeconds(
-    Math.max(0, entry.spd),
-    targetEta,
-    availableDeceleration(
-      entry.spd,
-      dynamics.baseMu,
-      dynamics.downforceScale
-    )
-  );
-  const rejoinProgress = holdProgress + Math.max(
-    PHYS.carLen,
-    entry.spd * (Number.isFinite(rejoinSeconds)
-      ? rejoinSeconds
-      : MANEUVER_PREDICTION.horizonSeconds)
-  );
-  const acquisitionIndex = indexAtProgress(
-    track,
-    entry,
-    acquisitionProgress
-  );
-  const holdIndex = indexAtProgress(track, entry, holdProgress);
-  const rejoinIndex = indexAtProgress(track, entry, rejoinProgress);
-  if (acquisitionIndex === holdIndex) return null;
-  return {
-    mode: side < 0 ? 'side-inside' : 'side-outside',
-    key: `cost:${entry.code}:escape:${side}:${start}`,
-    anchors: [
-      currentAuthoredAnchor(session, entry),
-      {
-        index: acquisitionIndex,
-        offset: track.idealPath.off[acquisitionIndex]! + targetEta,
-        s: acquisitionProgress
-      },
-      {
-        index: holdIndex,
-        offset: track.idealPath.off[holdIndex]! + targetEta,
-        s: holdProgress
-      },
-      {
-        index: rejoinIndex,
-        offset: track.idealPath.off[rejoinIndex]!,
-        s: rejoinProgress
-      }
-    ],
-    pinnedFirst: true,
-    topology: side < 0 ? 'left' : 'right',
-    surfaceAuthorization: 'emergency',
-    emergencyReason: 'collision-avoidance',
-    leaderCode: hazards[0]?.other.code ?? null
-  };
-}
-
-/**
- * The emergency member is one constraint-derived response for the complete
- * live hazard set. Both connected surface components are solved in closed
- * form; projecting onto the nearer component is not an online arc search.
- */
-function jointEmergencyEscapeSeed(
-  session: Session,
-  entry: ActiveEntry,
-  hazards: readonly Hazard[]
-): RacecraftCandidateSeed | null {
-  const isLegal = (plan: DynamicPlan): boolean => {
-    if (!candidateRespectsAgreement(session, entry, plan)) return false;
-    const endProgress = plan.anchors.at(-1)?.s ?? entry.prog;
-    const distance = Math.max(0, endProgress - entry.prog);
-    const samples = Math.max(
-      1,
-      Math.ceil(distance / session.trk.step)
-    );
-    for (let sample = 0; sample <= samples; sample++) {
-      const progress = entry.prog + distance * sample / samples;
-      const index = indexAtProgress(session.trk, entry, progress);
-      const lateral = sampleCompactPathPlanOffset(
-        session.trk,
-        plan,
-        index,
-        progress
-      );
-      if (!emergencyLateralIsLegal(
-        session.trk,
-        index,
-        lateral
-      )) return false;
-    }
-    return true;
-  };
-  let selected: { side: -1 | 1; plan: DynamicPlan; move: number } | null =
-    null;
-  for (const side of [-1, 1] as const) {
-    const plan = emergencyEscapePlan(session, entry, hazards, side);
-    const acquisition = plan?.anchors[1];
-    if (!plan || !acquisition || !isLegal(plan)) continue;
-    const move = Math.abs(acquisition.offset - entry.latNow);
-    if (!selected ||
-        move < selected.move - Number.EPSILON ||
-        (Math.abs(move - selected.move) <= Number.EPSILON &&
-          side < selected.side))
-      selected = { side, plan, move };
-  }
-  return selected
-    ? {
-        kind: selected.side < 0
-          ? 'corner-inside'
-          : 'corner-outside',
-        plan: selected.plan,
-        slowPointOwnerCode: null
-      }
-    : null;
-}
-
 function blendAnchoredPlan(
   track: Track,
   plan: DynamicPlan,
@@ -1693,60 +1995,168 @@ function blendAnchoredPlan(
 }
 
 function subtractForbidden(
-  allowed: readonly LambdaInterval[],
+  allowed: LambdaIntervalWorkspace,
   forbiddenMinimum: number,
   forbiddenMaximum: number
-): LambdaInterval[] {
+): void {
   const minimum = Math.max(0, Math.min(1, forbiddenMinimum));
   const maximum = Math.max(0, Math.min(1, forbiddenMaximum));
-  if (maximum < 0 || minimum > 1 || minimum > maximum) return [...allowed];
-  const next: LambdaInterval[] = [];
-  for (const [from, to] of allowed) {
+  if (maximum < 0 || minimum > 1 || minimum > maximum) return;
+  let nextCount = 0;
+  for (let index = 0; index < allowed.count; index++) {
+    const from = allowed.from[index]!;
+    const to = allowed.to[index]!;
     if (maximum <= from || minimum >= to) {
-      next.push([from, to]);
+      allowed.nextFrom[nextCount] = from;
+      allowed.nextTo[nextCount] = to;
+      nextCount++;
       continue;
     }
-    if (minimum > from) next.push([from, Math.min(to, minimum)]);
-    if (maximum < to) next.push([Math.max(from, maximum), to]);
+    if (minimum > from) {
+      const nextTo = Math.min(to, minimum);
+      if (nextTo - from > Number.EPSILON) {
+        allowed.nextFrom[nextCount] = from;
+        allowed.nextTo[nextCount] = nextTo;
+        nextCount++;
+      }
+    }
+    if (maximum < to) {
+      const nextFrom = Math.max(from, maximum);
+      if (to - nextFrom > Number.EPSILON) {
+        allowed.nextFrom[nextCount] = nextFrom;
+        allowed.nextTo[nextCount] = to;
+        nextCount++;
+      }
+    }
   }
-  return next.filter(([from, to]) => to - from > Number.EPSILON);
+  const previousFrom = allowed.from;
+  const previousTo = allowed.to;
+  allowed.from = allowed.nextFrom;
+  allowed.to = allowed.nextTo;
+  allowed.nextFrom = previousFrom;
+  allowed.nextTo = previousTo;
+  allowed.count = nextCount;
 }
 
 function intersectAllowed(
-  allowed: readonly LambdaInterval[],
+  allowed: LambdaIntervalWorkspace,
   minimum: number,
   maximum: number
-): LambdaInterval[] {
+): void {
   const lower = Math.max(0, minimum);
   const upper = Math.min(1, maximum);
-  if (lower > upper) return [];
-  const next: LambdaInterval[] = [];
-  for (const [from, to] of allowed) {
+  if (lower > upper) {
+    allowed.count = 0;
+    return;
+  }
+  let nextCount = 0;
+  for (let index = 0; index < allowed.count; index++) {
+    const from = allowed.from[index]!;
+    const to = allowed.to[index]!;
     const intersectionFrom = Math.max(from, lower);
     const intersectionTo = Math.min(to, upper);
-    if (intersectionFrom <= intersectionTo)
-      next.push([intersectionFrom, intersectionTo]);
+    if (intersectionFrom <= intersectionTo) {
+      allowed.nextFrom[nextCount] = intersectionFrom;
+      allowed.nextTo[nextCount] = intersectionTo;
+      nextCount++;
+    }
   }
-  return next;
+  const previousFrom = allowed.from;
+  const previousTo = allowed.to;
+  allowed.from = allowed.nextFrom;
+  allowed.to = allowed.nextTo;
+  allowed.nextFrom = previousFrom;
+  allowed.nextTo = previousTo;
+  allowed.count = nextCount;
 }
 
 function constrainAffineToEnvelope(
-  allowed: readonly LambdaInterval[],
+  allowed: LambdaIntervalWorkspace,
   ideal: number,
   full: number,
   minimum: number,
   maximum: number
-): LambdaInterval[] {
+): void {
   const slope = full - ideal;
-  if (Math.abs(slope) <= Number.EPSILON)
-    return ideal >= minimum && ideal <= maximum ? [...allowed] : [];
+  if (Math.abs(slope) <= Number.EPSILON) {
+    if (ideal < minimum || ideal > maximum) allowed.count = 0;
+    return;
+  }
   const first = (minimum - ideal) / slope;
   const second = (maximum - ideal) / slope;
-  return intersectAllowed(
+  intersectAllowed(
     allowed,
     Math.min(first, second),
     Math.max(first, second)
   );
+}
+
+function stagedAcquisitionMinimumLambda(
+  session: Session,
+  entry: ActiveEntry,
+  idealPlan: DynamicPlan,
+  fullPlan: DynamicPlan,
+  evaluationClaims: EvaluationClaimMap
+): number | null {
+  if (!fullPlan.leaderCode) return 0;
+  const claim = evaluationClaims.get(fullPlan.leaderCode)?.claim;
+  if (!claim) return null;
+  const age = Math.max(0, session.t - claim.publishedAt);
+  const idealProgram = compileCompactLateralProgram(
+    session.trk,
+    idealPlan
+  );
+  const fullProgram = compileCompactLateralProgram(
+    session.trk,
+    fullPlan
+  );
+  let side = 0;
+  const sampleCount = racecraftClaimSegmentCount(claim) + 1;
+  for (let sample = 0; sample < sampleCount; sample++) {
+    const seconds = sample === 0
+      ? 0
+      : racecraftClaimSegmentEndTime(claim, sample - 1);
+    const progress = entry.prog + Math.max(0, entry.spd) * seconds;
+    const ideal = writeSampleCompactLateralProgram(
+      session.trk,
+      idealProgram,
+      progress,
+      lambdaIdealSampleScratch
+    ).value;
+    const full = writeSampleCompactLateralProgram(
+      session.trk,
+      fullProgram,
+      progress,
+      lambdaFullSampleScratch
+    ).value;
+    const delta = full - ideal;
+    if (side === 0 && Math.abs(delta) > Number.EPSILON)
+      side = Math.sign(delta);
+    stagedLambdaIdeal[sample] = ideal;
+    stagedLambdaDelta[sample] = delta;
+    stagedLambdaLeader[sample] = writeRacecraftClaimStateAtTime(
+      session.trk,
+      claim,
+      age + seconds,
+      lambdaClaimStateScratch
+    ).lateral;
+  }
+  if (side === 0) return null;
+
+  let minimum = Infinity;
+  for (let sample = 0; sample < sampleCount; sample++) {
+    const base = side * (
+      stagedLambdaIdeal[sample]! - stagedLambdaLeader[sample]!
+    );
+    if (base >= PHYS.carWid - Number.EPSILON) return 0;
+    const reach = side * stagedLambdaDelta[sample]!;
+    if (reach <= Number.EPSILON) continue;
+    const required = (PHYS.carWid - base) / reach;
+    if (required >= -Number.EPSILON &&
+        required <= 1 + Number.EPSILON)
+      minimum = Math.min(minimum, clamp(required, 0, 1));
+  }
+  return Number.isFinite(minimum) ? minimum : null;
 }
 
 /**
@@ -1763,8 +2173,24 @@ function clearanceLambda(
   evaluationClaims: EvaluationClaimMap = EMPTY_EVALUATION_CLAIMS
 ): LambdaSeed | null {
   const track = session.trk;
-  let allowed: LambdaInterval[] = [[0, 1]];
-  const conflicts: LambdaConflict[] = [];
+  const idealProgram = compileCompactLateralProgram(track, idealPlan);
+  const fullProgram = compileCompactLateralProgram(track, fullPlan);
+  // An attack member must be large enough to acquire physical side room.
+  // This also rejects a corner family after its meaningful lateral gates
+  // have passed, allowing the caller to author the open straight family.
+  const acquisitionMinimum = stagedAcquisitionMinimumLambda(
+    session,
+    entry,
+    idealPlan,
+    fullPlan,
+    evaluationClaims
+  );
+  if (fullPlan.leaderCode && acquisitionMinimum == null) return null;
+  const allowed = lambdaIntervals;
+  allowed.from[0] = acquisitionMinimum ?? 0;
+  allowed.to[0] = 1;
+  allowed.count = 1;
+  let conflictCount = 0;
   const agreement = sideAgreementBounds(session, entry);
   if (agreement) {
     const horizon = horizonProgress(entry);
@@ -1783,14 +2209,24 @@ function clearanceLambda(
         fullPlan.surfaceAuthorization ?? 'normal'
       );
       if (envelope.viable === false) return null;
-      allowed = constrainAffineToEnvelope(
+      constrainAffineToEnvelope(
         allowed,
-        sampleCompactPathPlanOffset(track, idealPlan, index, progress),
-        sampleCompactPathPlanOffset(track, fullPlan, index, progress),
+        writeSampleCompactLateralProgram(
+          track,
+          idealProgram,
+          progress,
+          lambdaIdealSampleScratch
+        ).value,
+        writeSampleCompactLateralProgram(
+          track,
+          fullProgram,
+          progress,
+          lambdaFullSampleScratch
+        ).value,
         envelope.minimum,
         envelope.maximum
       );
-      if (!allowed.length) return null;
+      if (!allowed.count) return null;
     }
   }
   for (const other of entries) {
@@ -1801,35 +2237,43 @@ function clearanceLambda(
     const prediction = evaluationClaims.get(other.code);
     if (!prediction) continue;
     const claim = prediction.claim;
-    for (let stationIndex = 0;
-      stationIndex < claim.stations.length;
-      stationIndex++) {
-      const stationTime = claim.stations.time[stationIndex]!;
-      const stationS = claim.stations.s[stationIndex]!;
+    for (let segmentIndex = 0;
+      segmentIndex < racecraftClaimSegmentCount(claim);
+      segmentIndex++) {
+      const stationTime = racecraftClaimSegmentEndTime(
+        claim,
+        segmentIndex
+      );
+      const stationState = writeRacecraftClaimStateAtTime(
+        track,
+        claim,
+        stationTime,
+        lambdaClaimStateScratch
+      );
+      const stationS = stationState.s;
       const egoS = (
         entry.car.s + Math.max(0, entry.spd) * stationTime
       ) % track.len;
       if (Math.abs(signedTrackDistance(track, egoS, stationS)) >
           PHYS.carLen)
         continue;
-      const index = cyclicIndex(track, egoS / track.step);
       const egoProgress = entry.prog +
         Math.max(0, entry.spd) * stationTime;
-      const y0 = sampleCompactPathPlanOffset(
+      const y0 = writeSampleCompactLateralProgram(
         track,
-        idealPlan,
-        index,
-        egoProgress
-      );
-      const y1 = sampleCompactPathPlanOffset(
+        idealProgram,
+        egoProgress,
+        lambdaIdealSampleScratch
+      ).value;
+      const y1 = writeSampleCompactLateralProgram(
         track,
-        fullPlan,
-        index,
-        egoProgress
-      );
+        fullProgram,
+        egoProgress,
+        lambdaFullSampleScratch
+      ).value;
       const slope = y1 - y0;
       const overlap = PHYS.carWid;
-      const stationLateral = claim.stations.y[stationIndex]!;
+      const stationLateral = stationState.lateral;
       const lower = stationLateral - overlap;
       const upper = stationLateral + overlap;
       if (Math.abs(slope) <= Number.EPSILON) {
@@ -1838,42 +2282,62 @@ function clearanceLambda(
         // and hard feasibility still evaluate it after the seed is authored.
         continue;
       }
-      conflicts.push({
-        ideal: y0,
-        slope,
-        centre: stationLateral,
-        overlap
-      });
+      lambdaConflictIdeal[conflictCount] = y0;
+      lambdaConflictSlope[conflictCount] = slope;
+      lambdaConflictCentre[conflictCount] = stationLateral;
+      lambdaConflictOverlap[conflictCount] = overlap;
+      conflictCount++;
       const first = (lower - y0) / slope;
       const second = (upper - y0) / slope;
-      allowed = subtractForbidden(
+      subtractForbidden(
         allowed,
         Math.min(first, second),
         Math.max(first, second)
       );
     }
   }
-  if (!allowed.length) {
-    const breakpoints = new Set<number>([1]);
-    for (const conflict of conflicts)
-      for (const edge of [-conflict.overlap, conflict.overlap])
-        breakpoints.add(clamp(
-          (conflict.centre + edge - conflict.ideal) / conflict.slope,
+  if (!allowed.count) {
+    let breakpointCount = 1;
+    lambdaBreakpoints[0] = 1;
+    for (let conflict = 0; conflict < conflictCount; conflict++)
+      for (let edgeIndex = 0; edgeIndex < 2; edgeIndex++) {
+        const edge = edgeIndex === 0
+          ? -lambdaConflictOverlap[conflict]!
+          : lambdaConflictOverlap[conflict]!;
+        const breakpoint = clamp(
+          (
+            lambdaConflictCentre[conflict]! + edge -
+              lambdaConflictIdeal[conflict]!
+          ) / lambdaConflictSlope[conflict]!,
           0,
           1
-        ));
+        );
+        let exists = false;
+        for (let index = 0; index < breakpointCount; index++)
+          if (lambdaBreakpoints[index] === breakpoint) {
+            exists = true;
+            break;
+          }
+        if (!exists) lambdaBreakpoints[breakpointCount++] = breakpoint;
+      }
     let bestLambda: number | null = null;
     let bestOverlap = Infinity;
-    for (const lambda of breakpoints) {
+    for (let index = 0; index < breakpointCount; index++) {
+      const lambda = lambdaBreakpoints[index]!;
       if (lambda <= Number.EPSILON) continue;
       let totalOverlap = 0;
-      for (const conflict of conflicts) {
+      for (let conflict = 0; conflict < conflictCount; conflict++) {
         const separation = Math.abs(
-          conflict.ideal + lambda * conflict.slope - conflict.centre
+          lambdaConflictIdeal[conflict]! +
+            lambda * lambdaConflictSlope[conflict]! -
+            lambdaConflictCentre[conflict]!
         );
         totalOverlap += Math.max(
           0,
-          1 - separation / Math.max(Number.EPSILON, conflict.overlap)
+          1 - separation / Math.max(
+            Number.EPSILON,
+            lambdaConflictOverlap[conflict]!
+          )
         );
       }
       if (totalOverlap < bestOverlap - Number.EPSILON ||
@@ -1888,13 +2352,20 @@ function clearanceLambda(
       : { lambda: bestLambda };
   }
   if (preferMaximum)
-    return { lambda: allowed.at(-1)![1] };
-  const distinct = allowed.find(([, to]) => to > Number.EPSILON);
-  if (!distinct) return null;
+    return { lambda: allowed.to[allowed.count - 1]! };
+  let distinct = -1;
+  for (let index = 0; index < allowed.count; index++)
+    if (allowed.to[index]! > Number.EPSILON) {
+      distinct = index;
+      break;
+    }
+  if (distinct < 0) return null;
   // λ=0 is the ideal member already evaluated separately. A lateral family
-  // member must remain a distinct response even when the ideal is clear.
+  // member must remain a distinct candidate even when the ideal is clear.
   return {
-    lambda: distinct[0] > Number.EPSILON ? distinct[0] : distinct[1]
+    lambda: allowed.from[distinct]! > Number.EPSILON
+      ? allowed.from[distinct]!
+      : allowed.to[distinct]!
   };
 }
 
@@ -1905,7 +2376,6 @@ function seededSideCandidate(
   kind: 'corner-inside' | 'corner-outside',
   full: DynamicPlan,
   preferMaximum = false,
-  enforceOneMove = true,
   evaluationClaims: EvaluationClaimMap = EMPTY_EVALUATION_CLAIMS
 ): RacecraftCandidateSeed | null {
   const zero = blendAnchoredPlan(session.trk, full, 0);
@@ -1943,73 +2413,27 @@ function seededSideCandidate(
     // printed digit and polluted bounded diagnostic keys.
     key: `${full.key}:lambda`
   };
-  const targetProgress = horizonProgress(entry);
-  const targetIndex = indexAtProgress(session.trk, entry, targetProgress);
-  const target = sampleCompactPathPlanOffset(
-    session.trk,
-    plan,
-    targetIndex,
-    targetProgress
-  );
-  const seed = (!enforceOneMove ||
-      racecraftOneMoveLegal(session, entry, entries, kind, target))
-    ? { kind, plan, slowPointOwnerCode: null }
-    : null;
-  return seed;
-}
-
-export function racecraftDefensiveAttacker(
-  session: Session,
-  defender: Entry,
-  entries: readonly Entry[],
-  targetLateral: number
-): Entry | null {
-  if (!defender.car) return null;
-  const nearest = activeDefensiveAttacker(
-    session,
-    defender as ActiveEntry,
-    entries
-  )?.entry ?? null;
-  if (!nearest) return null;
-  return Math.abs(targetLateral - nearest.latNow) <
-    Math.abs(defender.latNow - nearest.latNow)
-    ? nearest
-    : null;
-}
-
-export function racecraftOneMoveLegal(
-  session: Session,
-  defender: Entry,
-  entries: readonly Entry[],
-  kind: RacecraftCandidateKind,
-  targetLateral: number
-): boolean {
-  if (kind === 'hold' || kind === 'brake-behind') return true;
-  const attacker = racecraftDefensiveAttacker(
-    session,
-    defender,
-    entries,
-    targetLateral
-  );
-  if (!attacker ||
-      defender._defSeenAttackers?.[attacker.code] !== true) return true;
-  return defender._racecraftAppliedKind === kind;
+  return { kind, plan, slowPointOwnerCode: null };
 }
 
 function brakeBehindSeed(
   session: Session,
   entry: ActiveEntry,
-  leader: ActiveEntry
+  leader: ActiveEntry,
+  physicalPlan?: PathPlan
 ): RacecraftCandidateSeed {
-  return {
-    kind: 'brake-behind',
-    plan: {
+  const plan: DynamicPlan = {
       ...currentProgramPlan(session, entry),
       key: `cost:${entry.code}:brake-behind:${leader.code}:` +
         cyclicIndex(session.trk, entry.car.progIdx),
       topology: 'brake',
       leaderCode: leader.code
-    },
+  };
+  if (physicalPlan)
+    candidatePhysicalPlanByPlan.set(plan, physicalPlan);
+  return {
+    kind: 'brake-behind',
+    plan,
     slowPointOwnerCode: leader.code
   };
 }
@@ -2044,9 +2468,7 @@ function buildCandidateSeeds(
   const previousSelected = entry.racecraftDecision?.candidates.find(candidate =>
     candidate.planNumericId ===
       entry.racecraftDecision?.selectedPlanNumericId);
-  const incumbentKind = entry._racecraftAppliedKind ??
-    entry.racecraftDecision?.selectedKind ??
-    'hold';
+  const incumbentKind = entry.racecraftDecision?.selectedKind ?? 'hold';
   const seeds: RacecraftCandidateSeed[] = [{
     kind: incumbentKind,
     plan: currentProgramPlan(session, entry),
@@ -2072,9 +2494,9 @@ function buildCandidateSeeds(
     cyclicIndex(session.trk, entry.car.progIdx)
   );
   if (corner) {
-    for (const kind of [
-      'corner-inside',
-      'corner-outside'
+    for (const [kind, fallbackSide] of [
+      ['corner-inside', -1],
+      ['corner-outside', 1]
     ] as const) {
       const full = fullCornerPlan(
         session,
@@ -2091,16 +2513,35 @@ function buildCandidateSeeds(
             kind,
             full,
             false,
-            true,
             evaluationClaims
           )
         : null;
-      if (seeded)
+      const fallbackFull = seeded
+        ? null
+        : straightFullPlan(
+            session,
+            entry,
+            fallbackSide,
+            leader?.entry.code ?? null
+          );
+      const fallback = fallbackFull
+        ? seededSideCandidate(
+            session,
+            entry,
+            entries,
+            kind,
+            fallbackFull,
+            false,
+            evaluationClaims
+          )
+        : null;
+      const selectedSeed = seeded ?? fallback;
+      if (selectedSeed)
         appendDistinctCandidateSeed(
           session,
           seeds,
           familyNumericIds,
-          seeded
+          selectedSeed
         );
     }
   } else {
@@ -2122,7 +2563,6 @@ function buildCandidateSeeds(
             kind,
             full,
             false,
-            true,
             evaluationClaims
           )
         : null;
@@ -2144,7 +2584,7 @@ function buildCandidateSeeds(
     );
   // `ideal` and `recenter` author the same physical acquisition. The
   // incumbent slot already preserves an in-flight recenter; evaluating a
-  // second labelled copy would consume the emergency-response budget.
+  // second labelled copy would consume the bounded candidate budget.
   if (seeds.length > MAX_RACECRAFT_CANDIDATES)
     throw new Error(`Racecraft candidate budget exceeded: ${seeds.length}/6`);
   evaluatorWork(session).candidateSeedsBuilt += seeds.length;
@@ -2241,6 +2681,58 @@ function brakingEffortForPlan(
   );
 }
 
+function candidateTowPublishedStatesAt(
+  session: Session,
+  entry: ActiveEntry,
+  evaluationClaims: EvaluationClaimMap,
+  time: number
+): CandidateTowPublishedStates {
+  let byTime = candidateTowPublishedStates.get(evaluationClaims);
+  if (!byTime) {
+    byTime = new Map();
+    candidateTowPublishedStates.set(evaluationClaims, byTime);
+  }
+  const cached = byTime.get(time);
+  if (cached) {
+    evaluatorWork(session).rivalStateCacheHits++;
+    return cached;
+  }
+  const views = candidateTowClaimViewsFor(entry, evaluationClaims);
+  const count = views.length;
+  const workspace = candidateTowWorkspaceByClaims.get(evaluationClaims);
+  const bufferIndex = workspace?.towPublishedStateUsed ?? -1;
+  if (workspace) workspace.towPublishedStateUsed++;
+  let states = bufferIndex >= 0
+    ? workspace!.towPublishedStateBuffers[bufferIndex]
+    : undefined;
+  if (!states || states.s.length !== count) {
+    states = {
+      count,
+      s: new Float64Array(count),
+      lateral: new Float64Array(count)
+    };
+    if (workspace)
+      workspace.towPublishedStateBuffers[bufferIndex] = states;
+  } else {
+    states.count = count;
+  }
+  let index = 0;
+  for (const view of views) {
+    const state = writeRacecraftClaimTowStateAtTime(
+      session.trk,
+      view.claim,
+      time,
+      candidateTowLateralStateScratch
+    );
+    states.s[index] = state.s;
+    states.lateral[index] = state.lateral;
+    index++;
+  }
+  byTime.set(time, states);
+  evaluatorWork(session).rivalStateBuilds++;
+  return states;
+}
+
 /**
  * Candidate rollouts consume the frozen leader publication, not the entry's
  * current wake scalar. This preserves the tucked prefix and lets a pull-out
@@ -2254,116 +2746,153 @@ function candidateTowStrength(
   lateral: number,
   speed: number,
   evaluationClaims: EvaluationClaimMap,
-  shareRivalSnapshot = false
+  sharedGridSlot = -1,
+  preparedGrid?: CandidateTowRivalGridCache,
+  preparedTowRangeM?: number,
+  preparedWakeSpreadRate?: number
 ): number {
   if (!evaluationClaims.size) return 0;
   const ownS = wrappedTrackS(
     session.trk,
     entry.car.s + progress - entry.prog
   );
-  let nearest: CandidateTowRivalSnapshot | undefined;
-  let byProgress: Map<number, CandidateTowRivalSnapshot> | undefined;
-  if (shareRivalSnapshot) {
-    let byEntry = candidateTowRivalSnapshots.get(evaluationClaims);
-    if (!byEntry) {
-      byEntry = new WeakMap();
-      candidateTowRivalSnapshots.set(evaluationClaims, byEntry);
-    }
-    byProgress = byEntry.get(entry);
-    if (!byProgress) {
-      byProgress = new Map();
-      byEntry.set(entry, byProgress);
-    }
-    nearest = byProgress.get(progress);
-    if (nearest) evaluatorWork(session).rivalStateCacheHits++;
-  }
-  let nearestCode = nearest?.code ?? null;
-  let nearestDownstream = nearest?.downstream ?? 0;
-  let nearestLateral = nearest?.lateral ?? 0;
-  if (!nearest) {
-    for (const [code, view] of evaluationClaims) {
-      if (code === entry.code) continue;
-      const rival = writeRacecraftClaimStateAtTime(
-        session.trk,
-        view.claim,
-        time,
-        candidateTowStateScratch
+  let hasNearest = false;
+  let nearestDownstream = 0;
+  let nearestLateral = 0;
+  if (sharedGridSlot >= 0) {
+    if (!preparedGrid)
+      throw new Error('Shared tow grid requires a decision workspace');
+    if (preparedGrid.computed[sharedGridSlot]) {
+      evaluatorWork(session).rivalStateCacheHits++;
+      if (!preparedGrid.hasNearest[sharedGridSlot]) return 0;
+      const calibration = preparedTowRangeM == null ||
+          preparedWakeSpreadRate == null
+        ? racecraftCalibration()
+        : null;
+      return wakeStrength(
+        preparedGrid.downstream[sharedGridSlot]!,
+        preparedGrid.lateral[sharedGridSlot]! - lateral,
+        speed,
+        preparedTowRangeM ?? calibration!.towRangeM,
+        preparedWakeSpreadRate ?? calibration!.wakeSpreadRate
       );
+    }
+    if (sharedGridSlot === 0) {
+      const rivalStates = candidateTowPublishedStatesAt(
+        session,
+        entry,
+        evaluationClaims,
+        time
+      );
+      for (let index = 0; index < rivalStates.count; index++) {
+        const downstream = forwardTrackDistance(
+          session.trk,
+          ownS,
+          rivalStates.s[index]!
+        );
+        if (downstream > TRAFFIC_NEIGHBOR_SCAN_METRES) continue;
+        // Evaluation claims are inserted in code order. Keeping the first
+        // exact-distance tie therefore preserves the lexical tie-break
+        // without carrying strings through the numeric cache.
+        if (!hasNearest ||
+            downstream < nearestDownstream - Number.EPSILON) {
+          hasNearest = true;
+          nearestDownstream = downstream;
+          nearestLateral = rivalStates.lateral[index]!;
+        }
+      }
+    } else {
+      for (const view of candidateTowClaimViewsFor(
+        entry,
+        evaluationClaims
+      )) {
+        const state = writeRacecraftClaimTowStateAtTime(
+          session.trk,
+          view.claim,
+          time,
+          candidateTowLateralStateScratch
+        );
+        const downstream = forwardTrackDistance(
+          session.trk,
+          ownS,
+          state.s
+        );
+        if (downstream > TRAFFIC_NEIGHBOR_SCAN_METRES) continue;
+        if (!hasNearest ||
+            downstream < nearestDownstream - Number.EPSILON) {
+          hasNearest = true;
+          nearestDownstream = downstream;
+          nearestLateral = state.lateral;
+        }
+      }
+    }
+    preparedGrid.computed[sharedGridSlot] = 1;
+    preparedGrid.hasNearest[sharedGridSlot] = hasNearest ? 1 : 0;
+    preparedGrid.downstream[sharedGridSlot] = nearestDownstream;
+    preparedGrid.lateral[sharedGridSlot] = nearestLateral;
+    if (sharedGridSlot !== 0) evaluatorWork(session).rivalStateBuilds++;
+  } else {
+    const rivalStates = candidateTowPublishedStatesAt(
+      session,
+      entry,
+      evaluationClaims,
+      time
+    );
+    for (let index = 0; index < rivalStates.count; index++) {
       const downstream = forwardTrackDistance(
         session.trk,
         ownS,
-        rival.s
+        rivalStates.s[index]!
       );
       if (downstream > TRAFFIC_NEIGHBOR_SCAN_METRES) continue;
-      if (nearestCode == null ||
-          downstream < nearestDownstream - Number.EPSILON ||
-          (Math.abs(downstream - nearestDownstream) <= Number.EPSILON &&
-            code.localeCompare(nearestCode) < 0)) {
-        nearestCode = code;
+      if (!hasNearest ||
+          downstream < nearestDownstream - Number.EPSILON) {
+        hasNearest = true;
         nearestDownstream = downstream;
-        nearestLateral = rival.lateral;
+        nearestLateral = rivalStates.lateral[index]!;
       }
     }
-    if (byProgress)
-      byProgress.set(progress, {
-        code: nearestCode,
-        downstream: nearestDownstream,
-        lateral: nearestLateral
-      });
-    evaluatorWork(session).rivalStateBuilds++;
   }
-  if (nearestCode == null) return 0;
-  const calibration = racecraftCalibration();
-  return wakeEffect(
+  if (!hasNearest) return 0;
+  const calibration = preparedTowRangeM == null ||
+      preparedWakeSpreadRate == null
+    ? racecraftCalibration()
+    : null;
+  return wakeStrength(
     nearestDownstream,
     nearestLateral - lateral,
     speed,
-    {
-      characteristicDistance: calibration.towRangeM,
-      spreadRate: calibration.wakeSpreadRate
-    }
-  ).drag;
+    preparedTowRangeM ?? calibration!.towRangeM,
+    preparedWakeSpreadRate ?? calibration!.wakeSpreadRate
+  );
 }
 
 function candidateDragScale(
-  session: Session,
-  entry: Entry,
+  dynamics: RacecraftFamilyDynamics,
   towStrength?: number
 ): number {
-  const current = evaluatorDynamics(session, entry).modifiers.dr;
-  if (towStrength == null) return current;
-  const reduction = racecraftCalibration().towDragReduction;
-  const currentFactor = Math.max(
-    Number.EPSILON,
-    1 - reduction * clamp(entry.tow || 0, 0, 1)
-  );
-  const base = current / currentFactor;
-  return base * (
-    1 - reduction * clamp(towStrength, 0, 1)
+  if (towStrength == null) return dynamics.modifiers.dr;
+  return dynamics.untowedDragScale * (
+    1 - dynamics.towDragReduction * clamp(towStrength, 0, 1)
   );
 }
 
 function driveAcceleration(
-  session: Session,
-  entry: Entry,
+  dynamics: RacecraftFamilyDynamics,
   speed: number,
   curvature: number,
   dynamicMu?: number,
   surfaceDrag = 0,
   towStrength?: number
 ): number {
-  const dynamics = evaluatorDynamics(session, entry);
   const modifiers = dynamics.modifiers;
   const force = Math.min(
     PHYS.Fmax * modifiers.pw,
     PHYS.power * modifiers.pw / Math.max(4, speed)
   );
   const resistance =
-    PHYS.kDrag * candidateDragScale(
-      session,
-      entry,
-      towStrength
-    ) * speed * speed +
+    PHYS.kDrag * candidateDragScale(dynamics, towStrength) *
+      speed * speed +
     PHYS.kRoll +
     speed * Math.max(0, surfaceDrag);
   const longitudinal = longitudinalAccelerationHeadroom(
@@ -2376,18 +2905,14 @@ function driveAcceleration(
 }
 
 function passiveDeceleration(
-  session: Session,
-  entry: Entry,
+  dynamics: RacecraftFamilyDynamics,
   speed: number,
   surfaceDrag: number,
   towStrength?: number
 ): number {
   return (
-    PHYS.kDrag * candidateDragScale(
-      session,
-      entry,
-      towStrength
-    ) * speed * speed +
+    PHYS.kDrag * candidateDragScale(dynamics, towStrength) *
+      speed * speed +
     PHYS.kRoll +
     speed * Math.max(0, surfaceDrag)
   ) / PHYS.m;
@@ -2402,28 +2927,17 @@ function speedLawAt(
   law: CandidateSpeedLaw,
   progress: number
 ): number {
-  if (progress <= law.progress[0]!) return law.speed[0]!;
-  for (let index = 1; index < law.progress.length; index++) {
-    if (progress > law.progress[index]!) continue;
-    const fromProgress = law.progress[index - 1]!;
-    const toProgress = law.progress[index]!;
-    const u = (progress - fromProgress) /
-      Math.max(Number.EPSILON, toProgress - fromProgress);
-    return law.speed[index - 1]! +
-      (law.speed[index]! - law.speed[index - 1]!) * clamp(u, 0, 1);
-  }
-  return law.speed.at(-1)!;
+  return speedEnvelopeAt(law.envelope, progress);
 }
 
 function speedLawAddsConstraint(
   reference: CandidateSpeedLaw,
   constrained: CandidateSpeedLaw
 ): boolean {
-  if (reference.progress.length !== constrained.progress.length ||
-      reference.speed.length !== constrained.speed.length)
-    return true;
-  return constrained.speed.some((speed, index) =>
-    speed < reference.speed[index]! - Number.EPSILON);
+  return speedEnvelopeAddsConstraint(
+    reference.envelope,
+    constrained.envelope
+  );
 }
 
 function programSpeedAtProgress(
@@ -2442,6 +2956,44 @@ function programSpeedAtProgress(
   return stations.at(-1)!.speed;
 }
 
+function applyCandidateTrafficSpeedConstraint(
+  track: Track,
+  entry: ActiveEntry,
+  owner: ActiveEntry,
+  divergence: number,
+  count: number,
+  firstSharedSlot: number,
+  hasReference: boolean,
+  speed: number[],
+  source: Array<EntryTrafficSlowPoint | null>,
+  stationS: number,
+  constraintSpeed: number,
+  publishedAt: number
+): void {
+  const clearanceDistance = Math.max(
+    0,
+    forwardTrackDistance(track, entry.car.s, stationS) -
+      PHYS.carLen - divergence
+  );
+  const slot = Math.min(
+    count - 1,
+    Math.ceil(clearanceDistance / track.step)
+  );
+  if ((hasReference && slot >= firstSharedSlot) ||
+      constraintSpeed >= speed[slot]! - Number.EPSILON)
+    return;
+  const constrained = Math.max(0, constraintSpeed);
+  speed[slot] = constrained;
+  source[slot] = {
+    distance: clearanceDistance,
+    speed: constrained,
+    ownerCode: owner.code,
+    reason: 'traffic-follow:cost-candidate',
+    stationS: (entry.car.s + clearanceDistance) % track.len,
+    publishedAt
+  };
+}
+
 /**
  * Compose every published target into one spatial law, then retain only the
  * station whose constraint reaches the current sample. Headroom is local to
@@ -2454,8 +3006,11 @@ function composeCandidateSpeedLaw(
   slowPointOwnerCode: string | null,
   entries: readonly Entry[],
   evaluationClaims: EvaluationClaimMap = EMPTY_EVALUATION_CLAIMS,
-  effortOverride?: number
+  effortOverride?: number,
+  workspace?: CandidateEvaluationWorkspace
 ): CandidateSpeedLaw {
+  if (plan.mode === 'pit')
+    throw new Error('Pit authority cannot enter speed-law composition');
   const track = session.trk;
   const dynamics = evaluatorDynamics(session, entry);
   const brakingEffort = clamp(
@@ -2467,117 +3022,270 @@ function composeCandidateSpeedLaw(
     LANE_BUFFER_CAPACITY,
     Math.ceil(LANE_BUFFER_DISTANCE_METRES / track.step) + 1
   );
-  evaluatorWork(session).speedLawSamples += count;
-  const progress: number[] = [];
-  const speed: number[] = [];
-  const states: LaneState[] = [];
-  const source: Array<EntryTrafficSlowPoint | null> = [];
-  for (let slot = 0; slot < count; slot++) {
-    const at = entry.prog + slot * track.step;
-    const state = laneStateAt(session, entry, at, plan);
-    progress.push(at);
-    states.push(state);
-    speed.push(state.targetSpeed);
-    source.push(null);
+  const stagedAttack = plan.mode !== 'ideal' &&
+    (plan.mode === 'side-inside' || plan.mode === 'side-outside') &&
+    plan.surfaceAuthorization !== 'emergency' &&
+    plan.leaderCode != null;
+  let owner: ActiveEntry | null = null;
+  let stagedLeader: ActiveEntry | null = null;
+  for (let index = 0; index < entries.length; index++) {
+    const candidate = entries[index];
+    if (!candidate?.car) continue;
+    if (!owner && slowPointOwnerCode != null &&
+        candidate.code === slowPointOwnerCode)
+      owner = candidate as ActiveEntry;
+    if (!stagedLeader && stagedAttack &&
+        candidate.code === plan.leaderCode)
+      stagedLeader = candidate as ActiveEntry;
+    if ((owner || slowPointOwnerCode == null) &&
+        (stagedLeader || !stagedAttack))
+      break;
   }
-  const owner = slowPointOwnerCode
-    ? entries.find((candidate): candidate is ActiveEntry =>
-      candidate.code === slowPointOwnerCode && !!candidate.car)
+  const stagedPublication = stagedLeader
+    ? evaluationClaims.get(stagedLeader.code)?.claim ?? null
     : null;
-  if (owner) {
-    const divergence = oneIntervalPhysicalDivergence(session, owner);
-    const claim = evaluationClaims.get(owner.code)?.claim;
-    const constraints: Array<{
-      stationS: number;
-      speed: number;
-      publishedAt: number;
-    }> = [{
-      stationS: claim?.originS ?? owner.car.s,
-      speed: claim?.originSpeed ?? owner.spd,
-      publishedAt: claim?.publishedAt ?? session.t
-    }];
-    if (claim)
-      for (let stationIndex = 0;
-        stationIndex < claim.stations.length;
-        stationIndex++)
-        constraints.push({
-          stationS: claim.stations.s[stationIndex]!,
-          speed: claim.stations.v[stationIndex]!,
-          publishedAt: claim.publishedAt
-        });
-    for (const constraint of constraints) {
-      const clearanceDistance = Math.max(
-        0,
-        forwardTrackDistance(track, entry.car.s, constraint.stationS) -
-          PHYS.carLen - divergence
-      );
-      const slot = Math.min(
-        count - 1,
-        Math.ceil(clearanceDistance / track.step)
-      );
-      if (constraint.speed >= speed[slot]! - Number.EPSILON) continue;
-      speed[slot] = Math.max(0, constraint.speed);
-      source[slot] = {
-        distance: clearanceDistance,
-        speed: Math.max(0, constraint.speed),
-        ownerCode: owner.code,
-        reason: 'traffic-follow:cost-candidate',
-        stationS: (entry.car.s + clearanceDistance) % track.len,
-        publishedAt: constraint.publishedAt
-      };
+  // A staged side candidate starts from its unconstrained capability law.
+  // Its target leader is composed afterward only through the continuously
+  // solved acquisition prefix; pre-applying that leader here would make
+  // braking after side clearance propagate backward and absorb the attack.
+  const deferStagedLeaderConstraint =
+    owner === stagedLeader && stagedPublication != null;
+  const effectiveOwnerCode = owner && !deferStagedLeaderConstraint
+    ? owner.code
+    : null;
+  const idealAfterProgress = plan.mode === 'ideal'
+    ? -Infinity
+    : plan.lineTerminal === 'sustained-offset'
+      ? Infinity
+      : plan.anchors.at(-1)?.s ?? Infinity;
+  let reference: CandidateSpeedLawReference | null = null;
+  let firstSharedSlot = count;
+  for (const candidate of workspace?.speedLawReferences ?? []) {
+    if (candidate.brakingEffort !== brakingEffort ||
+        candidate.ownerCode !== effectiveOwnerCode)
+      continue;
+    const sharedAfter = Math.max(
+      idealAfterProgress,
+      candidate.idealAfterProgress
+    );
+    if (!Number.isFinite(sharedAfter)) continue;
+    let slot = Math.max(
+      0,
+      Math.floor((sharedAfter - entry.prog) / track.step) + 1
+    );
+    while (slot < count &&
+        entry.prog + slot * track.step <=
+          sharedAfter + Number.EPSILON)
+      slot++;
+    if (slot < firstSharedSlot) {
+      reference = candidate;
+      firstSharedSlot = slot;
     }
   }
-  for (let slot = count - 2; slot >= 0; slot--) {
-    const state = states[slot]!;
+  const construction = workspace
+    ? candidateSpeedConstructionBuffer(workspace, count)
+    : null;
+  const speed = construction?.speed ?? new Array<number>(count);
+  const source = construction?.source ??
+    new Array<EntryTrafficSlowPoint | null>(count);
+  const spatial = prepareCandidateSpatialState(session, entry, plan);
+  const calibration = racecraftCalibration();
+  const towGrid = workspace
+    ? workspace.towGridCache ?? (workspace.towGridCache = {
+        computed: new Uint8Array(LANE_BUFFER_CAPACITY),
+        hasNearest: new Uint8Array(LANE_BUFFER_CAPACITY),
+        downstream: new Float64Array(LANE_BUFFER_CAPACITY),
+        lateral: new Float64Array(LANE_BUFFER_CAPACITY)
+      })
+    : undefined;
+  for (let slot = 0; slot < count; slot++) {
+    const at = entry.prog + slot * track.step;
+    if (reference && slot >= firstSharedSlot) {
+      speed[slot] = reference.speed[slot]!;
+      source[slot] = reference.source[slot] ?? null;
+      continue;
+    }
+    if (!spatial.valid[slot])
+      writeCandidateSpatialStateSlot(
+        session,
+        entry,
+        spatial,
+        slot,
+        at
+      );
+    speed[slot] = spatial.targetSpeed[slot]!;
+    source[slot] = null;
+  }
+  evaluatorWork(session).speedLawSamples += firstSharedSlot;
+  if (owner && !deferStagedLeaderConstraint) {
+    const divergence = oneIntervalPhysicalDivergence(session, owner);
+    const claim = evaluationClaims.get(owner.code)?.claim;
+    applyCandidateTrafficSpeedConstraint(
+      track,
+      entry,
+      owner,
+      divergence,
+      count,
+      firstSharedSlot,
+      reference != null,
+      speed,
+      source,
+      claim?.originS ?? owner.car.s,
+      claim?.originSpeed ?? owner.spd,
+      claim?.publishedAt ?? session.t
+    );
+    if (claim)
+      for (let segmentIndex = 0;
+        segmentIndex < racecraftClaimSegmentCount(claim);
+        segmentIndex++) {
+        const state = writeRacecraftClaimStateAtTime(
+          track,
+          claim,
+          racecraftClaimSegmentEndTime(claim, segmentIndex),
+          candidateTowStateScratch
+        );
+        applyCandidateTrafficSpeedConstraint(
+          track,
+          entry,
+          owner,
+          divergence,
+          count,
+          firstSharedSlot,
+          reference != null,
+          speed,
+          source,
+          state.s,
+          state.speed,
+          claim.publishedAt
+        );
+      }
+  }
+  const backwardStart = reference
+    ? firstSharedSlot - 1
+    : count - 2;
+  for (let slot = backwardStart; slot >= 0; slot--) {
     const localSpeed = Math.max(0, speed[slot]!);
+    const progress = entry.prog + slot * track.step;
     const estimatedTime = Math.max(
       0,
-      progress[slot]! - entry.prog
+      progress - entry.prog
     ) / Math.max(Number.EPSILON, entry.spd || entry.car.spd);
     const tow = candidateTowStrength(
       session,
       entry,
-      progress[slot]!,
+      progress,
       estimatedTime,
-      state.lateral,
+      spatial.lateral[slot]!,
       localSpeed,
       evaluationClaims,
-      true
+      slot,
+      towGrid,
+      calibration.towRangeM,
+      calibration.wakeSpreadRate
     );
     const room = longitudinalAccelerationHeadroom(
       localSpeed,
-      state.curvature,
-      state.dynamicMu,
+      spatial.curvature[slot]!,
+      spatial.dynamicMu[slot]!,
       dynamics.downforceScale
     );
     const braking = brakingEffort * room +
       passiveDeceleration(
-        session,
-        entry,
+        dynamics,
         localSpeed,
-        state.surfaceDrag,
+        spatial.surfaceDrag[slot]!,
         tow
       );
     const allowed = Math.sqrt(
       speed[slot + 1]! * speed[slot + 1]! +
-        2 * braking * state.q * track.step
+        2 * braking * spatial.q[slot]! * track.step
     );
     if (allowed < speed[slot]! - Number.EPSILON) {
       speed[slot] = allowed;
       source[slot] = source[slot + 1] ?? null;
     }
   }
+  if (workspace && Number.isFinite(idealAfterProgress))
+    workspace.speedLawReferences.push({
+      brakingEffort,
+      ownerCode: effectiveOwnerCode,
+      idealAfterProgress,
+      speed,
+      source
+    });
+  if (stagedAttack) {
+    if (stagedLeader && stagedPublication) {
+      const terminalProgress = entry.prog + (count - 1) * track.step;
+      const terminalLateral = (
+        spatial.valid[count - 1]
+          ? spatial.lateral[count - 1]!
+          : laneStateAt(
+          session,
+          entry,
+          terminalProgress,
+          plan
+        ).lateral
+      );
+      const side: -1 | 1 =
+        terminalLateral < stagedPublication.originCentre ? -1 : 1;
+      const lateralProgram = compileCompactLateralProgram(track, plan);
+      const composition = composeRacecraftStagedAttackProgram(
+        session,
+        entry,
+        stagedLeader,
+        stagedPublication,
+        side,
+        {
+          envelope: speedEnvelopeFromUniformSamples(
+            entry.prog,
+            track.step,
+            speed,
+            construction?.envelope
+          ),
+          brakingEffort,
+          slowPointOwnerCode: null,
+          bindingSlowPoint: null
+        },
+        at => writeCompactLateralPoseAtProgress(
+          track,
+          lateralProgram,
+          at,
+          candidateLateralPoseScratch
+        )
+      );
+      return {
+        envelope: composition.program.envelope,
+        brakingEffort,
+        slowPoint: composition.program.bindingSlowPoint,
+        longitudinalOwnerCode:
+          composition.program.slowPointOwnerCode,
+        stagedClearanceProgressMetres:
+          composition.clearanceProgressMetres,
+        stagedClearanceSeconds: composition.clearanceSeconds,
+        stagedConstrainedSeconds: composition.constrainedSeconds,
+        stagedPublicationMissing: false
+      };
+    }
+  }
   return {
-    progress,
-    speed,
+    envelope: speedEnvelopeFromUniformSamples(
+      entry.prog,
+      track.step,
+      speed,
+      construction?.envelope
+    ),
     brakingEffort,
-    slowPoint: source[0] ?? null
+    slowPoint: source[0] ?? null,
+    longitudinalOwnerCode: owner?.code ?? null,
+    stagedClearanceProgressMetres: null,
+    stagedClearanceSeconds: null,
+    stagedConstrainedSeconds: 0,
+    stagedPublicationMissing: stagedAttack
   };
 }
 
 function nextProgramSpeed(
-  session: Session,
-  entry: ActiveEntry,
+  dynamics: RacecraftFamilyDynamics,
   state: LaneState,
   progress: number,
   speed: number,
@@ -2591,15 +3299,14 @@ function nextProgramSpeed(
     speed,
     state.curvature,
     state.dynamicMu,
-    evaluatorDynamics(session, entry).downforceScale
+    dynamics.downforceScale
   );
   if (target < speed) {
     const deceleration = Math.max(
       0,
       brakingEffort * headroom +
         passiveDeceleration(
-          session,
-          entry,
+          dynamics,
           speed,
           state.surfaceDrag,
           towStrength
@@ -2613,8 +3320,7 @@ function nextProgramSpeed(
   return Math.max(0, Math.min(
     target,
     speed + driveAcceleration(
-      session,
-      entry,
+      dynamics,
       speed,
       state.curvature,
       state.dynamicMu,
@@ -2625,8 +3331,7 @@ function nextProgramSpeed(
 }
 
 function advanceReferenceGeometrySpeed(
-  session: Session,
-  entry: ActiveEntry,
+  dynamics: RacecraftFamilyDynamics,
   state: LaneState,
   distance: number,
   speed: number,
@@ -2637,14 +3342,13 @@ function advanceReferenceGeometrySpeed(
     speed,
     state.curvature,
     state.dynamicMu,
-    evaluatorDynamics(session, entry).downforceScale
+    dynamics.downforceScale
   );
   if (targetSpeed < speed) {
     const deceleration =
       brakingEffort * headroom +
       passiveDeceleration(
-        session,
-        entry,
+        dynamics,
         speed,
         state.surfaceDrag
       );
@@ -2657,8 +3361,7 @@ function advanceReferenceGeometrySpeed(
     );
   }
   const acceleration = Math.max(0, driveAcceleration(
-    session,
-    entry,
+    dynamics,
     speed,
     state.curvature,
     state.dynamicMu,
@@ -2692,7 +3395,8 @@ function terminalContinuationSeconds(
   let referenceSpeed = Math.max(0, referenceStartSpeed);
   let progress = startProgress;
   let difference = 0;
-  const margin = evaluatorDynamics(session, entry).margin;
+  const dynamics = evaluatorDynamics(session, entry);
+  const margin = dynamics.margin;
   for (let sample = 0; sample < session.trk.n; sample++) {
     const scale = Math.max(1, candidateSpeed, referenceSpeed);
     if (Math.abs(candidateSpeed - referenceSpeed) <=
@@ -2710,8 +3414,7 @@ function terminalContinuationSeconds(
     );
     const distance = state.q * session.trk.step;
     const candidateNext = advanceReferenceGeometrySpeed(
-      session,
-      entry,
+      dynamics,
       state,
       distance,
       candidateSpeed,
@@ -2719,8 +3422,7 @@ function terminalContinuationSeconds(
       candidateBrakingEffort
     );
     const referenceNext = advanceReferenceGeometrySpeed(
-      session,
-      entry,
+      dynamics,
       state,
       distance,
       referenceSpeed,
@@ -2746,17 +3448,25 @@ function ownTimeSeconds(
   stations: readonly ProgramStation[],
   brakingEffort: number
 ): number {
+  if (plan.mode === 'pit')
+    throw new Error('Pit authority cannot enter racecraft own-time scoring');
   const track = session.trk;
   const margin = evaluatorDynamics(session, entry).margin;
   const distance = Math.max(8, entry.spd) *
     MANEUVER_PREDICTION.horizonSeconds;
   const segments = Math.max(1, Math.ceil(distance / track.step));
   const ds = distance / segments;
+  const lateralProgram = compileCompactLateralProgram(track, plan);
   let total = 0;
   for (let segment = 0; segment < segments; segment++) {
     const progress = entry.prog + (segment + 0.5) * ds;
     const index = indexAtProgress(track, entry, progress);
-    const state = laneStateAt(session, entry, progress, plan);
+    const geometry = writeCompactLateralGeometryAtProgress(
+      track,
+      lateralProgram,
+      progress,
+      ownTimeGeometryScratch
+    );
     const referenceQ = Math.max(
       Number.EPSILON,
       track.idealPath.ds[index]! / track.step
@@ -2767,7 +3477,7 @@ function ownTimeSeconds(
     );
     const candidateSpeed = programSpeedAtProgress(stations, progress);
     const difference = ds * (
-      state.q / Math.max(Number.EPSILON, candidateSpeed) -
+      geometry.q / Math.max(Number.EPSILON, candidateSpeed) -
       referenceQ / referenceSpeed
     );
     total += difference;
@@ -2797,6 +3507,8 @@ function programStations(
   let speed = Math.max(0, entry.spd || entry.car.spd);
   let progress = entry.prog;
   let previousTime = 0;
+  const dynamics = evaluatorDynamics(session, entry);
+  const prepared = prepareLaneStateProgram(session, entry, plan);
   const stations: ProgramStation[] = [{
     time: 0,
     progress,
@@ -2810,15 +3522,16 @@ function programStations(
       )
     )
   }];
+  let state = preparedLaneStateAt(
+    session,
+    entry,
+    progress,
+    prepared
+  );
+  stations[0]!.familyState = state;
   for (let sample = 1; sample <= MANEUVER_PREDICTION.samples; sample++) {
     const time = maneuverPredictionStationTime(sample);
     const stepSeconds = time - previousTime;
-    const state = laneStateAt(
-      session,
-      entry,
-      progress,
-      plan
-    );
     const tow = candidateTowStrength(
       session,
       entry,
@@ -2829,8 +3542,7 @@ function programStations(
       evaluationClaims
     );
     const nextSpeed = nextProgramSpeed(
-      session,
-      entry,
+      dynamics,
       state,
       progress,
       speed,
@@ -2841,19 +3553,20 @@ function programStations(
     );
     progress += (speed + nextSpeed) * 0.5 * stepSeconds;
     speed = nextSpeed;
-    const lane = laneStateAt(
+    state = preparedLaneStateAt(
       session,
       entry,
       progress,
-      plan
+      prepared
     );
     stations.push({
       time,
       progress,
       s: (entry.car.s + progress - entry.prog) % session.trk.len,
-      lateral: lane.lateral,
+      lateral: state.lateral,
       speed,
-      headingOffsetRadians: lane.headingOffsetRadians
+      headingOffsetRadians: state.headingOffsetRadians,
+      familyState: state
     });
     previousTime = time;
   }
@@ -2881,7 +3594,7 @@ function programGripUtilization(
     cumulativeSeconds: number;
   }> = [];
   for (const station of stations) {
-    const state = laneStateAt(
+    const state = station.familyState ?? laneStateAt(
       session,
       entry,
       station.progress,
@@ -2995,6 +3708,120 @@ function programStationAtTime(
   });
 }
 
+function staticRejectedCandidateProgram(
+  session: Session,
+  entry: ActiveEntry,
+  entries: readonly Entry[],
+  seed: RacecraftCandidateSeed,
+  previousKind: RacecraftCandidateKind | null,
+  evaluationClaims: EvaluationClaimMap,
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[],
+  workspace: CandidateEvaluationWorkspace,
+  diagnostic: ManeuverCandidateDiagnostic,
+  brakingEffort: number,
+  spatial: CandidateSpatialStateScratch,
+  retainedSpeedLaw?: CandidateSpeedLaw
+): CandidateProgram {
+  const currentSpeed = Math.max(0, entry.spd || entry.car.spd);
+  let speedLaw = retainedSpeedLaw ?? workspace.rejectedSpeedLaw;
+  if (!speedLaw || speedLaw.brakingEffort !== brakingEffort) {
+    speedLaw = {
+      envelope: speedEnvelopeFromSamples(
+        [entry.prog, entry.prog + session.trk.step],
+        [currentSpeed, currentSpeed]
+      ),
+      brakingEffort,
+      slowPoint: null,
+      longitudinalOwnerCode: null,
+      stagedClearanceProgressMetres: null,
+      stagedClearanceSeconds: null,
+      stagedConstrainedSeconds: 0,
+      stagedPublicationMissing: false
+    };
+    workspace.rejectedSpeedLaw = speedLaw;
+  }
+  let stations = workspace.rejectedStations;
+  if (!stations) {
+    stations = [{
+      time: 0,
+      progress: entry.prog,
+      s: entry.car.s,
+      lateral: entry.latNow,
+      speed: currentSpeed,
+      headingOffsetRadians: normAng(
+        entry.car.h - Math.atan2(
+          session.trk.ty[
+            Math.max(0, entry.car.progIdx) % session.trk.n
+          ]!,
+          session.trk.tx[
+            Math.max(0, entry.car.progIdx) % session.trk.n
+          ]!
+        )
+      )
+    }];
+    workspace.rejectedStations = stations;
+  }
+  let targetLateral = entry.latNow;
+  for (let slot = spatial.valid.length - 1; slot >= 0; slot--)
+    if (spatial.valid[slot]) {
+      targetLateral = spatial.lateral[slot]!;
+      break;
+    }
+  const evaluation: RacecraftCandidateEvaluation = {
+    kind: seed.kind,
+    plan: seed.plan,
+    planNumericId: racecraftPlanNumericId(seed.plan),
+    familyNumericId: racecraftFamilyNumericId(
+      session,
+      seed.kind,
+      seed.plan,
+      seed.slowPointOwnerCode
+    ),
+    feasible: false,
+    vetoes: [...diagnostic.rejections],
+    targetLateral,
+    slowPointOwnerCode: seed.slowPointOwnerCode,
+    slowPoint: null,
+    interactionCause: obligationsFor(session, entry, entries)[0]?.reason ??
+      (seed.slowPointOwnerCode ? 'draft' : 'ordinary'),
+    ownTimeSeconds: 0,
+    billSeconds: 0,
+    proximitySeconds: 0,
+    positionValueSeconds: 0,
+    attemptLossSeconds: 0,
+    battleSpendSeconds: 0,
+    effortRiskSeconds: 0,
+    positionGain: false,
+    minimumPlannedClearanceMetres: null,
+    tieBandSeconds: 0,
+    hazardCount: 0,
+    switchChanged: previousKind != null && previousKind !== seed.kind,
+    brakingEffort,
+    gripUtilization: clamp(diagnostic.controllerDemand, 0, 1),
+    direction: directionFor(targetLateral - entry.latNow),
+    speedClass: seed.kind === 'brake-behind' ? 'brake' : 'free',
+    cost: Infinity
+  };
+  return {
+    evaluation,
+    stations,
+    speedLaw,
+    bounds: null,
+    positionGains: null,
+    authoredExtensions: null,
+    evaluationClaims,
+    ownershipAssertion: null,
+    actionableOwnershipViews,
+    defenderReclaim: false,
+    defensiveLegality: null,
+    utilizationExposureSeconds: 0,
+    utilizationExposure: [],
+    fullyScored: true,
+    branchBounded: false,
+    effortRiskComputed: true
+  };
+}
+
 function evaluateSeed(
   session: Session,
   entry: ActiveEntry,
@@ -3002,41 +3829,34 @@ function evaluateSeed(
   seed: RacecraftCandidateSeed,
   previousKind: RacecraftCandidateKind | null,
   evaluationClaims: EvaluationClaimMap,
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[],
+  workspace: CandidateEvaluationWorkspace,
   measureOwnTime = true,
   precomposedSpeedLaw?: CandidateSpeedLaw
 ): CandidateProgram {
   evaluatorWork(session).seedEvaluations++;
-  const speedLaw = precomposedSpeedLaw ?? composeCandidateSpeedLaw(
-    session,
-    entry,
-    seed.plan,
-    seed.slowPointOwnerCode,
-    entries,
-    evaluationClaims
+  const brakingEffort = precomposedSpeedLaw?.brakingEffort ?? clamp(
+    brakingEffortForPlan(entry, seed.plan),
+    BOT_BRAKING_EFFORT_MINIMUM,
+    BOT_BRAKING_EFFORT_MAXIMUM
   );
-  const stations = programStations(
-    session,
-    entry,
-    seed.plan,
-    speedLaw,
-    evaluationClaims
-  );
-  const ownTime = measureOwnTime
-    ? ownTimeSeconds(
-        session,
-        entry,
-        seed.plan,
-        stations,
-        speedLaw.brakingEffort
-      )
-    : 0;
+  if (seed.plan.mode === 'pit')
+    throw new Error('Pit authority cannot enter the racecraft evaluator');
+  const spatial = prepareCandidateSpatialState(session, entry, seed.plan);
   let samplerContext = evaluatorManeuverSamplerContexts.get(entry);
   if (!samplerContext) {
     samplerContext = {
       session,
       entry,
       plan: seed.plan,
-      states: new Map(),
+      program: spatial.program,
+      dynamics: spatial.dynamics,
+      stateSlots: new Int32Array(session.trk.n),
+      stateStamps: new Uint32Array(session.trk.n),
+      stateGeneration: 1,
+      statePool: [],
+      stateUsed: 0,
+      spatial,
       diagnostic: undefined
     };
     evaluatorManeuverSamplerContexts.set(entry, samplerContext);
@@ -3044,7 +3864,22 @@ function evaluateSeed(
   samplerContext.session = session;
   samplerContext.entry = entry;
   samplerContext.plan = seed.plan;
-  samplerContext.states.clear();
+  samplerContext.spatial = spatial;
+  samplerContext.program = spatial.program;
+  samplerContext.dynamics = spatial.dynamics;
+  if (samplerContext.stateSlots.length !== session.trk.n) {
+    samplerContext.stateSlots = new Int32Array(session.trk.n);
+    samplerContext.stateStamps = new Uint32Array(session.trk.n);
+    samplerContext.stateGeneration = 1;
+  } else {
+    samplerContext.stateGeneration =
+      (samplerContext.stateGeneration + 1) >>> 0;
+    if (samplerContext.stateGeneration === 0) {
+      samplerContext.stateStamps.fill(0);
+      samplerContext.stateGeneration = 1;
+    }
+  }
+  samplerContext.stateUsed = 0;
   const diagnostic = evaluateManeuverPlanCompactWithSampler(
     session,
     entry,
@@ -3064,33 +3899,112 @@ function evaluateSeed(
       diagnostic.rejections.push('protected-corridor');
     diagnostic.feasible = false;
   }
+  const stagedAttack = seed.plan.mode !== 'ideal' &&
+    (seed.plan.mode === 'side-inside' ||
+      seed.plan.mode === 'side-outside') &&
+    seed.plan.surfaceAuthorization !== 'emergency' &&
+    seed.plan.leaderCode != null;
+  if (stagedAttack)
+    session.racecraftStagedCandidatesOpened =
+      (session.racecraftStagedCandidatesOpened ?? 0) + 1;
+  // `hold` remains the exact reference for conditional brake-behind
+  // admission even when its static geometry is rejected. Skipping that law
+  // would change the candidate set rather than merely avoid losing work.
+  if (!diagnostic.feasible && seed.kind !== 'hold')
+    return staticRejectedCandidateProgram(
+      session,
+      entry,
+      entries,
+      seed,
+      previousKind,
+      evaluationClaims,
+      actionableOwnershipViews,
+      workspace,
+      diagnostic,
+      brakingEffort,
+      spatial
+    );
+  const speedLaw = precomposedSpeedLaw ??
+    composeCandidateSpeedLaw(
+      session,
+      entry,
+      seed.plan,
+      seed.slowPointOwnerCode,
+      entries,
+      evaluationClaims,
+      brakingEffort,
+      workspace
+    );
+  if (!diagnostic.feasible)
+    return staticRejectedCandidateProgram(
+      session,
+      entry,
+      entries,
+      seed,
+      previousKind,
+      evaluationClaims,
+      actionableOwnershipViews,
+      workspace,
+      diagnostic,
+      brakingEffort,
+      spatial,
+      speedLaw
+    );
+  const stations = programStations(
+    session,
+    entry,
+    seed.plan,
+    speedLaw,
+    evaluationClaims
+  );
+  if (stagedAttack) {
+    session.racecraftStagedAcquisitionConstrainedSeconds =
+      (session.racecraftStagedAcquisitionConstrainedSeconds ?? 0) +
+      speedLaw.stagedConstrainedSeconds;
+  }
   const targetLateral = stations.at(-1)!.lateral;
-  const authoredTerminal = seed.plan.mode !== 'ideal' &&
-      seed.plan.mode !== 'pit' &&
+  const measuredOwnTime = measureOwnTime
+    ? ownTimeSeconds(
+        session,
+        entry,
+        seed.plan,
+        stations,
+        speedLaw.brakingEffort
+      )
+    : 0;
+  let authoredTerminal: number | null = null;
+  const finalProgress = stations.at(-1)!.progress;
+  if (seed.plan.mode !== 'ideal' &&
       (seed.plan.mode === 'side-inside' ||
-        seed.plan.mode === 'side-outside')
-    ? seed.plan.anchors
-        .map(anchor => anchor.s)
-        .filter((value): value is number =>
-          value != null &&
-          value > stations.at(-1)!.progress + Number.EPSILON)
-        .at(-1)
-    : null;
-  const utilizationStations = authoredTerminal != null &&
-      authoredTerminal - entry.prog <= session.trk.len / 2
-    ? [
-        ...stations.slice(0, -1),
-        ...extendedAuthoredProgramStations(
-          session,
-          entry,
-          seed.plan,
-          speedLaw,
-          stations,
-          authoredTerminal,
-          evaluationClaims
-        )
-      ]
-    : stations;
+        seed.plan.mode === 'side-outside'))
+    for (let index = seed.plan.anchors.length - 1; index >= 0; index--) {
+      const progress = seed.plan.anchors[index]!.s;
+      if (progress != null &&
+          progress > finalProgress + Number.EPSILON) {
+        authoredTerminal = progress;
+        break;
+      }
+    }
+  let authoredExtensions: Map<number, ProgramStation[]> | null = null;
+  let utilizationStations = stations;
+  if (authoredTerminal != null &&
+      authoredTerminal - entry.prog <= session.trk.len / 2) {
+    utilizationStations = [
+      ...stations.slice(0, -1),
+      ...extendedAuthoredProgramStations(
+        session,
+        entry,
+        seed.plan,
+        speedLaw,
+        stations,
+        authoredTerminal,
+        evaluationClaims
+      )
+    ];
+    authoredExtensions = new Map([
+      [authoredTerminal, utilizationStations]
+    ]);
+  }
   const grip = programGripUtilization(
     session,
     entry,
@@ -3108,16 +4022,20 @@ function evaluateSeed(
       seed.plan,
       seed.slowPointOwnerCode
     ),
-    feasible: diagnostic.feasible,
-    vetoes: [...diagnostic.rejections],
+    feasible: diagnostic.feasible && !speedLaw.stagedPublicationMissing,
+    vetoes: [
+      ...diagnostic.rejections,
+      ...(speedLaw.stagedPublicationMissing
+        ? ['forward-publication-unavailable']
+        : [])
+    ],
     targetLateral,
     slowPointOwnerCode: seed.slowPointOwnerCode,
     slowPoint: speedLaw.slowPoint,
     interactionCause: obligationsFor(session, entry, entries)[0]?.reason ??
       (seed.slowPointOwnerCode ? 'draft' : 'ordinary'),
-    ownTimeSeconds: ownTime,
+    ownTimeSeconds: measuredOwnTime,
     billSeconds: 0,
-    recourseSeconds: 0,
     proximitySeconds: 0,
     positionValueSeconds: 0,
     attemptLossSeconds: 0,
@@ -3141,123 +4059,76 @@ function evaluateSeed(
     evaluation,
     stations,
     speedLaw,
-    emergencyHazards: new Map(),
-    perturbations: new Map(),
-    bounds: new Map(),
-    positionGains: new Map(),
-    authoredExtensions: new Map(),
+    bounds: null,
+    positionGains: null,
+    authoredExtensions,
     evaluationClaims,
+    ownershipAssertion: null,
+    actionableOwnershipViews,
+    defenderReclaim: false,
+    defensiveLegality: null,
     utilizationExposureSeconds: grip.exposureSeconds,
-    utilizationExposure: grip.exposure
+    utilizationExposure: grip.exposure,
+    fullyScored: false,
+    branchBounded: false,
+    effortRiskComputed: false
   };
 }
 
-export function snapshotContestedRegion(
+export function publishedTrajectoriesContestedRegion(
   track: Track,
   ownClaim: RacecraftClaim,
   otherClaim: RacecraftClaim
 ): RacecraftContestedRegion | null {
-  const count = Math.min(
-    ownClaim.stations.length,
-    otherClaim.stations.length
-  );
-  let previousOwnS = ownClaim.originS;
-  let previousOtherS = otherClaim.originS;
-  let previousOwnLateral = ownClaim.originCentre;
-  let previousOtherLateral = otherClaim.originCentre;
-  let previousOwnHeading = ownClaim.originHeadingOffsetRadians;
-  let previousOtherHeading =
-    otherClaim.originHeadingOffsetRadians;
-  let previousLongitudinal = signedTrackDistance(
-    track,
-    previousOwnS,
-    previousOtherS
-  );
-  let previousLateral = previousOtherLateral - previousOwnLateral;
-  let previousTime = 0;
-  for (let stationIndex = 0; stationIndex < count; stationIndex++) {
-    const ownS = ownClaim.stations.s[stationIndex]!;
-    const otherS = otherClaim.stations.s[stationIndex]!;
-    const ownLateral = ownClaim.stations.y[stationIndex]!;
-    const otherLateral = otherClaim.stations.y[stationIndex]!;
-    const ownTime = ownClaim.stations.time[stationIndex]!;
-    const otherTime = otherClaim.stations.time[stationIndex]!;
-    const ownHeading = ownClaim.stations.heading[stationIndex]!;
-    const otherHeading = otherClaim.stations.heading[stationIndex]!;
-    const longitudinal = signedTrackDistance(
-      track,
-      ownS,
-      otherS
-    );
-    const lateral = otherLateral - ownLateral;
-    const elapsed = Math.max(
-      Number.EPSILON,
-      Math.min(ownTime, otherTime) - previousTime
-    );
-    const sweep = sweptCarContactIntervals(
-      previousLongitudinal,
-      previousLateral,
-      longitudinal,
-      lateral,
-      normAng(
-        previousOwnHeading +
-        normAng(
-          ownHeading - previousOwnHeading
-        ) / 2
-      ),
-      normAng(
-        previousOtherHeading +
-        normAng(
-          otherHeading - previousOtherHeading
-        ) / 2
-      )
-    )[0];
-    if (sweep) {
-      const fraction = sweep.enterFraction;
-      const ownDistance = forwardTrackDistance(
-        track,
-        previousOwnS,
-        ownS
-      );
-      const contactOwnS = (
-        previousOwnS + ownDistance * fraction
-      ) % track.len;
-      const otherDistance = forwardTrackDistance(
-        track,
-        stationIndex === 0
-          ? otherClaim.originS
-          : previousOtherS,
-        otherS
-      );
-      const contactOtherS = (
-        (stationIndex === 0
-          ? otherClaim.originS
-          : previousOtherS) +
-        otherDistance * fraction
-      ) % track.len;
-      const regionS = (
-        contactOwnS +
-        signedTrackDistance(track, contactOwnS, contactOtherS) / 2 +
-        track.len
-      ) % track.len;
-      return {
-        index: cyclicIndex(track, regionS / track.step),
-        s: regionS,
-        time: previousTime +
-          (ownTime - previousTime) * fraction
-      };
+  const ownHorizon = racecraftClaimHorizonSeconds(ownClaim);
+  const otherHorizon = racecraftClaimHorizonSeconds(otherClaim);
+  const end = Math.min(ownHorizon, otherHorizon);
+  const times = [0, end];
+  for (const claim of [ownClaim, otherClaim])
+    for (let index = 0;
+      index < racecraftClaimSegmentCount(claim);
+      index++) {
+      const time = racecraftClaimSegmentEndTime(claim, index);
+      if (time > 0 && time < end) times.push(time);
     }
-    previousOwnS = ownS;
-    previousOtherS = otherS;
-    previousOwnLateral = ownLateral;
-    previousOtherLateral = otherLateral;
-    previousOwnHeading = ownHeading;
-    previousOtherHeading = otherHeading;
-    previousLongitudinal = longitudinal;
-    previousLateral = lateral;
-    previousTime = Math.min(ownTime, otherTime);
+  times.sort((left, right) => left - right);
+  let count = Math.min(1, times.length);
+  for (let index = 1; index < times.length; index++) {
+    if (Math.abs(times[index]! - times[count - 1]!) <= Number.EPSILON)
+      continue;
+    times[count++] = times[index]!;
   }
-  return null;
+  times.length = count;
+  const poses = times.map(time => {
+    const own = racecraftClaimStateAtTime(track, ownClaim, time);
+    const other = racecraftClaimStateAtTime(track, otherClaim, time);
+    return {
+      timeSeconds: time,
+      relativeLongitudinal: signedTrackDistance(track, own.s, other.s),
+      relativeLateral: other.lateral - own.lateral,
+      egoHeadingRadians: own.headingOffsetRadians,
+      rivalHeadingRadians: other.headingOffsetRadians
+    };
+  });
+  const first = sweptCarContactEpisodes(poses)[0];
+  if (!first) return null;
+  const own = racecraftClaimStateAtTime(
+    track,
+    ownClaim,
+    first.startTimeSeconds
+  );
+  const other = racecraftClaimStateAtTime(
+    track,
+    otherClaim,
+    first.startTimeSeconds
+  );
+  return {
+    sMetres: (
+      own.s + signedTrackDistance(track, own.s, other.s) / 2 +
+      track.len
+    ) % track.len,
+    sessionTimeSeconds: first.startTimeSeconds
+  };
 }
 
 function hazardsFor(
@@ -3267,12 +4138,12 @@ function hazardsFor(
   evaluationClaims: EvaluationClaimMap
 ): Hazard[] {
   const hazards: Hazard[] = [];
-  const ownPrediction = evaluationClaims.get(entry.code);
-  const ownClaim = ownPrediction?.claim;
   for (const other of entries) {
     if (!racecraftIsInteractionNeighbor(session, entry, other)) continue;
     const prediction = evaluationClaims.get(other.code);
-    if (!prediction?.claim.stations.length) continue;
+    if (!prediction ||
+        racecraftClaimSegmentCount(prediction.claim) === 0)
+      continue;
     const claim = prediction.claim;
     const hazard: Hazard = {
       key: `${entry.code}:${other.code}`,
@@ -3282,24 +4153,12 @@ function hazardsFor(
       originLateral: claim.originCentre,
       originHeadingOffsetRadians:
         claim.originHeadingOffsetRadians,
-      ownClaim: ownClaim ?? null,
-      region: undefined,
-      adaptResponsibility: null,
-      rivalSweepGeometry: null,
-      bestPlanContinuation: null,
-      bestPlanContinuationResolved: false
+      rivalSweepGeometry: null
     };
     hazards.push(hazard);
   }
   evaluatorWork(session).hazardsBuilt += hazards.length;
   return hazards;
-}
-
-function programStationAt(
-  stations: readonly ProgramStation[],
-  stationIndex: number
-): ProgramStation {
-  return stations[Math.min(stationIndex + 1, stations.length - 1)]!;
 }
 
 function evaluationClaimsAt(
@@ -3332,29 +4191,57 @@ interface WorldBodyPose {
   headingRadians: number;
 }
 
+const trackTangentHeadings = new WeakMap<Track, Float64Array>();
+const sweptPoseScratch: SweptCarPosePair[] = [];
+const egoWorldPoseScratch: WorldBodyPose = {
+  x: 0,
+  y: 0,
+  headingRadians: 0
+};
+const rivalWorldPoseScratch: WorldBodyPose = {
+  x: 0,
+  y: 0,
+  headingRadians: 0
+};
+const offHorizonRivalStateScratch: RacecraftClaimState = {
+  progressMetres: 0,
+  s: 0,
+  lateral: 0,
+  speed: 0,
+  headingOffsetRadians: 0
+};
+
+function tangentHeadings(track: Track): Float64Array {
+  let headings = trackTangentHeadings.get(track);
+  if (headings) return headings;
+  headings = new Float64Array(track.n);
+  for (let index = 0; index < track.n; index++)
+    headings[index] = Math.atan2(track.ty[index]!, track.tx[index]!);
+  trackTangentHeadings.set(track, headings);
+  return headings;
+}
+
 /**
  * Convert one Frenet point to the fixed world frame consumed by the physical
  * four-circle sweep. Sweeping independently sampled track-frame coordinates
  * would rotate the frame between samples and invent non-physical closing
  * speeds in curved or long terminal rollouts.
  */
-function worldBodyPose(
+function writeWorldBodyPose(
   track: Track,
   s: number,
   lateral: number,
-  headingOffsetRadians: number
+  headingOffsetRadians: number,
+  out: WorldBodyPose
 ): WorldBodyPose {
   const sample = wrappedTrackS(track, s) / track.step;
   const fromIndex = Math.floor(sample) % track.n;
   const toIndex = (fromIndex + 1) % track.n;
   const amount = sample - Math.floor(sample);
-  const tangentFrom = Math.atan2(
-    track.ty[fromIndex]!,
-    track.tx[fromIndex]!
-  );
+  const headings = tangentHeadings(track);
+  const tangentFrom = headings[fromIndex]!;
   const tangentTo = tangentFrom + normAng(
-    Math.atan2(track.ty[toIndex]!, track.tx[toIndex]!) -
-      tangentFrom
+    headings[toIndex]! - tangentFrom
   );
   const tangent = tangentFrom +
     (tangentTo - tangentFrom) * amount;
@@ -3362,66 +4249,44 @@ function worldBodyPose(
     (track.x[toIndex]! - track.x[fromIndex]!) * amount;
   const centreY = track.y[fromIndex]! +
     (track.y[toIndex]! - track.y[fromIndex]!) * amount;
-  return {
-    x: centreX - Math.sin(tangent) * lateral,
-    y: centreY + Math.cos(tangent) * lateral,
-    headingRadians: normAng(tangent + headingOffsetRadians)
-  };
+  out.x = centreX - Math.sin(tangent) * lateral;
+  out.y = centreY + Math.cos(tangent) * lateral;
+  out.headingRadians = normAng(tangent + headingOffsetRadians);
+  return out;
 }
 
-function relativeWorldBodyPose(
+function worldBodyPose(
   track: Track,
-  ego: {
-    s: number;
-    lateral: number;
-    headingOffsetRadians: number;
-  },
-  rival: {
-    s: number;
-    lateral: number;
-    headingOffsetRadians: number;
-  }
-): {
-  relativeLongitudinal: number;
-  relativeLateral: number;
-  egoHeadingRadians: number;
-  rivalHeadingRadians: number;
-} {
-  const egoWorld = worldBodyPose(
-    track,
-    ego.s,
-    ego.lateral,
-    ego.headingOffsetRadians
-  );
-  const rivalWorld = worldBodyPose(
-    track,
-    rival.s,
-    rival.lateral,
-    rival.headingOffsetRadians
-  );
-  return {
-    relativeLongitudinal: rivalWorld.x - egoWorld.x,
-    relativeLateral: rivalWorld.y - egoWorld.y,
-    egoHeadingRadians: egoWorld.headingRadians,
-    rivalHeadingRadians: rivalWorld.headingRadians
-  };
+  s: number,
+  lateral: number,
+  headingOffsetRadians: number
+): WorldBodyPose {
+  return writeWorldBodyPose(track, s, lateral, headingOffsetRadians, {
+    x: 0,
+    y: 0,
+    headingRadians: 0
+  });
 }
 
-function relativeWorldPose(
+function writeSweptPose(
+  index: number,
+  timeSeconds: number,
   egoWorld: WorldBodyPose,
   rivalWorld: WorldBodyPose
-): {
-  relativeLongitudinal: number;
-  relativeLateral: number;
-  egoHeadingRadians: number;
-  rivalHeadingRadians: number;
-} {
-  return {
-    relativeLongitudinal: rivalWorld.x - egoWorld.x,
-    relativeLateral: rivalWorld.y - egoWorld.y,
-    egoHeadingRadians: egoWorld.headingRadians,
-    rivalHeadingRadians: rivalWorld.headingRadians
-  };
+): SweptCarPosePair {
+  const out = sweptPoseScratch[index] ?? (sweptPoseScratch[index] = {
+    timeSeconds: 0,
+    relativeLongitudinal: 0,
+    relativeLateral: 0,
+    egoHeadingRadians: 0,
+    rivalHeadingRadians: 0
+  });
+  out.timeSeconds = timeSeconds;
+  out.relativeLongitudinal = rivalWorld.x - egoWorld.x;
+  out.relativeLateral = rivalWorld.y - egoWorld.y;
+  out.egoHeadingRadians = egoWorld.headingRadians;
+  out.rivalHeadingRadians = rivalWorld.headingRadians;
+  return out;
 }
 
 function rivalSweepGeometry(
@@ -3445,15 +4310,21 @@ function rivalSweepGeometry(
     return shared.geometry;
   }
   const stationGeometry = new Array<WorldBodyPose>(
-    claim.stations.length
+    racecraftClaimSegmentCount(claim)
   );
-  for (let index = 0; index < claim.stations.length; index++)
+  for (let index = 0; index < stationGeometry.length; index++) {
+    const state = racecraftClaimStateAtTime(
+      track,
+      claim,
+      racecraftClaimSegmentEndTime(claim, index)
+    );
     stationGeometry[index] = worldBodyPose(
       track,
-      claim.stations.s[index]!,
-      claim.stations.y[index]!,
-      claim.stations.heading[index]!
+      state.s,
+      state.lateral,
+      state.headingOffsetRadians
     );
+  }
   const geometry = {
     origin: worldBodyPose(
       track,
@@ -3475,500 +4346,9 @@ function rivalSweepGeometry(
   return geometry;
 }
 
-function publicationRevision(
-  session: Session,
-  entry: Entry
-): number {
-  return session.racecraftClaims
-    ?.get(entry.code)
-    ?.publicationRevision ?? -1;
-}
-
-function certificateClaimRevisions(
-  session: Session,
-  neighbors: readonly Entry[]
-): Record<string, number> {
-  const revisions: Record<string, number> = Object.create(null);
-  for (const neighbor of neighbors)
-    revisions[neighbor.code] = publicationRevision(session, neighbor);
-  return revisions;
-}
-
-function agreementAuthorityTuple(
-  session: Session,
-  entry: Entry,
-  neighbor: Entry
-): readonly unknown[] | null {
-  const agreement = session.sideAgreements?.get(
-    racecraftPairKey(entry.code, neighbor.code)
-  );
-  if (!agreement) return null;
-  return [
-    neighbor.code,
-    agreement.side,
-    agreement.separatorEta,
-    agreement.centreClearance,
-    agreement.since,
-    agreement.familyCertificate.contextKey,
-    agreement.familyCertificate.originS,
-    agreement.familyCertificate.spanMetres,
-    agreement.familyCertificate.lowerFamilyKey,
-    agreement.familyCertificate.upperFamilyKey
-  ];
-}
-
-/**
- * Exact discrete authority state. Continuous geometry and objective drift have
- * no theorem-backed Tier-0 band yet, so they are covered only by schedule
- * expiry; this key contains no inferred tolerance.
- */
-export function racecraftDecisionAuthorityKey(
-  session: Session,
-  entry: Entry,
-  neighbors: readonly Entry[]
-): string {
-  const ordered = [...neighbors].sort((left, right) =>
-    left.code.localeCompare(right.code));
-  const agreements = ordered
-    .map(neighbor => agreementAuthorityTuple(session, entry, neighbor))
-    .filter((value): value is readonly unknown[] => value != null);
-  const outgoingObligations = obligationsFor(
-    session,
-    entry,
-    [entry, ...ordered]
-  ).map(obligation => [
-    'out',
-    obligation.reason,
-    obligation.beneficiary.code
-  ]);
-  const incomingObligations = ordered.flatMap(neighbor =>
-    obligationsFor(session, neighbor, [neighbor, entry])
-      .filter(obligation => obligation.beneficiary === entry)
-      .map(obligation => [
-        'in',
-        obligation.reason,
-        neighbor.code
-      ]));
-  const obligations = [
-    ...outgoingObligations,
-    ...incomingObligations
-  ].sort((left, right) => JSON.stringify(left).localeCompare(
-    JSON.stringify(right)
-  ));
-  const attackers = ordered.flatMap(neighbor => {
-    const decision = neighbor.racecraftDecision;
-    const selected = decision?.candidates.find(candidate =>
-      candidate.planNumericId === decision.selectedPlanNumericId);
-    if (!selected || selected.kind === 'hold' ||
-        selected.kind === 'brake-behind' ||
-        selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
-        selected.plan.leaderCode !== entry.code)
-      return [];
-    return [racecraftStableFamilyId(
-      selected.kind,
-      selected.plan,
-      selected.slowPointOwnerCode
-    )];
-  }).sort();
-  const defendedAgainst = Object.entries(entry._defSeenAttackers ?? {})
-    .filter(([, active]) => active)
-    .map(([code]) => code)
-    .sort();
-  return JSON.stringify([
-    entry.state,
-    entry.pathPlan?.mode ?? '',
-    entry.car?.offCourse === true,
-    entry.recT > 0,
-    entry.avoidT > 0,
-    entry.pitArm != null,
-    entry.boxArm,
-    entry._racecraftAppliedKind ?? '',
-    entry.laneEdits ?? 0,
-    entry.laneProgram.binding ?? '',
-    entry.laneProgram.surfaceAuthorization ?? 'normal',
-    defendedAgainst,
-    attackers,
-    agreements,
-    obligations
-  ]);
-}
-
-function exactInteractionNeighbors(
-  session: Session,
-  entry: Entry,
-  entries: readonly Entry[]
-): Entry[] {
-  return entries
-    .filter(other => racecraftIsInteractionNeighbor(session, entry, other))
-    .sort((left, right) => left.code.localeCompare(right.code));
-}
-
-function makeDecisionCertificate(
-  session: Session,
-  entry: Entry,
-  neighbors: readonly Entry[],
-  selectedFamilyNumericId: number | null,
-  selectedFamilyId: string | null,
-  zeroHazardIdeal: boolean
-): RacecraftDecision['certificate'] {
-  const ordered = [...neighbors].sort((left, right) =>
-    left.code.localeCompare(right.code));
-  return {
-    selectedFamilyNumericId,
-    selectedFamilyId,
-    neighborCodes: ordered.map(neighbor => neighbor.code),
-    claimRevisions:
-      certificateClaimRevisions(session, ordered),
-    authorityKey: racecraftDecisionAuthorityKey(session, entry, ordered),
-    // β-drift and live-feasibility bands are not presently derivable. The
-    // declared deliberation interval is the conservative resolution ceiling.
-    validUntil: zeroHazardIdeal && ordered.length === 0
-      ? Infinity
-      : session.t + RACECRAFT_DECISION_INTERVAL_SECONDS,
-    zeroHazardIdeal
-  };
-}
-
-function sameStringArray(
-  left: readonly string[],
-  right: readonly string[]
-): boolean {
-  return left.length === right.length &&
-    left.every((value, index) => value === right[index]);
-}
-
-function sameRevisionRecord(
-  left: Readonly<Record<string, number>>,
-  right: Readonly<Record<string, number>>
-): boolean {
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  return sameStringArray(leftKeys, rightKeys) &&
-    leftKeys.every(key => left[key] === right[key]);
-}
-
-function samePredictionClass(
-  previous: RacecraftClaim,
-  current: RacecraftClaim
-): boolean {
-  return previous.code === current.code &&
-    previous.source === current.source &&
-    previous.trusted === current.trusted &&
-    previous.predictionKey === current.predictionKey &&
-    previous.lateralAuthorityRevision ===
-      current.lateralAuthorityRevision &&
-    previous.longitudinalAuthorityRevision ===
-      current.longitudinalAuthorityRevision;
-}
-
-/**
- * Re-express a revised point publication on the standing decision's absolute
- * time grid. Points that have already happened remain frozen; only the
- * affected hazard's still-future binding support is rebound.
- */
-function rebindClaimToStandingEpoch(
-  track: Track,
-  previous: RacecraftClaim,
-  current: RacecraftClaim,
-  elapsed: number
-): RacecraftClaim {
-  const stations = createRacecraftClaimStations(
-    previous.stations.length
-  );
-  stations.length = previous.stations.length;
-  for (let index = 0; index < stations.length; index++) {
-    const stationTime = previous.stations.time[index]!;
-    stations.time[index] = stationTime;
-    if (stationTime <= elapsed + Number.EPSILON) {
-      stations.s[index] = previous.stations.s[index]!;
-      stations.v[index] = previous.stations.v[index]!;
-      stations.y[index] = previous.stations.y[index]!;
-      stations.heading[index] = previous.stations.heading[index]!;
-      continue;
-    }
-    const rebound = racecraftClaimStateAtTime(
-      track,
-      current,
-      stationTime - elapsed
-    );
-    stations.s[index] = rebound.s;
-    stations.v[index] = rebound.speed;
-    stations.y[index] = rebound.lateral;
-    stations.heading[index] = rebound.headingOffsetRadians;
-  }
-  return {
-    ...previous,
-    publicationRevision: current.publicationRevision,
-    stations
-  };
-}
-
-function cloneProgramForIncrementalRecheck(
-  program: CandidateProgram
-): CandidateProgram {
-  const vetoes = program.evaluation.vetoes.filter(veto =>
-    veto !== 'predicted-hard-contact');
-  return {
-    ...program,
-    evaluation: {
-      ...program.evaluation,
-      feasible: vetoes.length === 0,
-      vetoes,
-      billSeconds: 0,
-      recourseSeconds: 0,
-      battleSpendSeconds: 0,
-      effortRiskSeconds: 0,
-      minimumPlannedClearanceMetres: null,
-      hazardCount: 0,
-      cost: Infinity
-    },
-    emergencyHazards: new Map(),
-    perturbations: new Map(),
-    bounds: new Map(),
-    positionGains: new Map(program.positionGains),
-    authoredExtensions: new Map(program.authoredExtensions)
-  };
-}
-
-function repriceFrozenProgramAgainstClaims(
-  session: Session,
-  entry: ActiveEntry,
-  entries: readonly Entry[],
-  program: CandidateProgram,
-  evaluationClaims: EvaluationClaimMap
-): CandidateProgram {
-  const rebound = cloneProgramForIncrementalRecheck(program);
-  if (!rebound.evaluation.feasible) return rebound;
-  const plan = rebound.evaluation.plan;
-  const speedLaw = composeCandidateSpeedLaw(
-    session,
-    entry,
-    plan,
-    rebound.evaluation.slowPointOwnerCode,
-    entries,
-    evaluationClaims,
-    rebound.speedLaw.brakingEffort
-  );
-  const stations = programStations(
-    session,
-    entry,
-    plan,
-    speedLaw,
-    evaluationClaims
-  );
-  const ownTime = ownTimeSeconds(
-    session,
-    entry,
-    plan,
-    stations,
-    speedLaw.brakingEffort
-  );
-  const authoredTerminal = plan.mode !== 'ideal' &&
-      plan.mode !== 'pit' &&
-      (plan.mode === 'side-inside' ||
-        plan.mode === 'side-outside')
-    ? plan.anchors
-        .map(anchor => anchor.s)
-        .filter((value): value is number =>
-          value != null &&
-          value > stations.at(-1)!.progress + Number.EPSILON)
-        .at(-1)
-    : null;
-  const utilizationStations = authoredTerminal != null &&
-      authoredTerminal - entry.prog <= session.trk.len / 2
-    ? [
-        ...stations.slice(0, -1),
-        ...extendedAuthoredProgramStations(
-          session,
-          entry,
-          plan,
-          speedLaw,
-          stations,
-          authoredTerminal,
-          evaluationClaims
-        )
-      ]
-    : stations;
-  const grip = programGripUtilization(
-    session,
-    entry,
-    plan,
-    speedLaw,
-    utilizationStations
-  );
-  return {
-    ...rebound,
-    evaluation: {
-      ...rebound.evaluation,
-      ownTimeSeconds: ownTime,
-      slowPoint: speedLaw.slowPoint,
-      brakingEffort: speedLaw.brakingEffort
-    },
-    stations,
-    speedLaw,
-    authoredExtensions: new Map(),
-    evaluationClaims,
-    utilizationExposureSeconds: grip.exposureSeconds,
-    utilizationExposure: grip.exposure
-  };
-}
-
-function restoreFixedEconomics(programs: readonly CandidateProgram[]): void {
-  for (const program of programs) {
-    const evaluation = program.evaluation;
-    if (!evaluation.feasible || !Number.isFinite(evaluation.cost))
-      continue;
-    evaluation.battleSpendSeconds = battleSpendSeconds({
-      measuredAttemptLossSeconds: evaluation.attemptLossSeconds,
-      contestSeconds: evaluation.recourseSeconds,
-      measuredProximitySeconds: evaluation.proximitySeconds
-    });
-    evaluation.cost +=
-      evaluation.positionValueSeconds +
-      evaluation.attemptLossSeconds +
-      evaluation.proximitySeconds;
-  }
-}
-
-/**
- * A point revision is new publication information, but it need not invalidate
- * an argmin that does not consume the changed points. Rebind the revised
- * hazard to the frozen candidate programs, then spend β on the full
- * candidate-minus-incumbent J difference. The selected speed law is part of
- * the certified decision and is not re-authored by this check; a β break
- * delegates that work to full deliberation.
- */
-function incrementalClaimRevisionIsInsideTieBand(
-  session: Session,
-  entry: ActiveEntry,
-  currentRevisions: Record<string, number>
-): boolean {
-  const decision = entry.racecraftDecision;
-  if (!decision) return false;
-  const snapshot = standingDecisionEvaluations.get(decision);
-  if (!snapshot?.selected) return false;
-  const triggerCodes = Object.keys(currentRevisions).filter(code =>
-    currentRevisions[code] !== decision.certificate.claimRevisions[code]
-  );
-  if (!triggerCodes.length) return false;
-  const elapsed = session.t - snapshot.at;
-  if (!Number.isFinite(elapsed) || elapsed < 0 ||
-      elapsed > RACECRAFT_DECISION_INTERVAL_SECONDS +
-        Number.EPSILON)
-    return false;
-
-  const evaluationClaims =
-    new Map<string, RacecraftEvaluationClaim>(
-      snapshot.evaluationClaims
-    );
-  for (const changedCode of triggerCodes) {
-    const previous = snapshot.evaluationClaims.get(changedCode)?.claim;
-    const current = session.racecraftClaims?.get(changedCode);
-    if (!previous || !current ||
-        !samePredictionClass(previous, current))
-      return false;
-  }
-  const reboundCodes = snapshot.hazards
-    .map(hazard => hazard.other.code)
-    .filter(code => {
-      const previous = snapshot.evaluationClaims.get(code)?.claim;
-      const current = session.racecraftClaims?.get(code);
-      return previous != null && current != null &&
-        previous.publicationRevision !== current.publicationRevision;
-    });
-  for (const changedCode of reboundCodes) {
-    const previous = snapshot.evaluationClaims.get(changedCode)!.claim;
-    const current = session.racecraftClaims!.get(changedCode)!;
-    if (!samePredictionClass(previous, current)) return false;
-    evaluationClaims.set(changedCode, {
-      claim: rebindClaimToStandingEpoch(
-        session.trk,
-        previous,
-        current,
-        elapsed
-      )
-    });
-  }
-  session.racecraftTier0BetaRechecks =
-    (session.racecraftTier0BetaRechecks ?? 0) + 1;
-  const reboundHazards = snapshot.hazards.map(previous => {
-    const rebound = evaluationClaims.get(previous.other.code)?.claim;
-    if (!reboundCodes.includes(previous.other.code) || !rebound)
-      return previous;
-    return {
-      ...previous,
-      claim: rebound,
-      region: undefined,
-      adaptResponsibility: null,
-      rivalSweepGeometry: null,
-      bestPlanContinuation: null,
-      bestPlanContinuationResolved: false
-    } satisfies Hazard;
-  });
-  const evaluationSession = snapshot.session;
-  const programs = snapshot.programs.map(program =>
-    repriceFrozenProgramAgainstClaims(
-      evaluationSession,
-      snapshot.entry,
-      snapshot.entries,
-      program,
-      evaluationClaims
-    ));
-  scorePrograms(
-    evaluationSession,
-    snapshot.entry,
-    programs,
-    reboundHazards
-  );
-  restoreFixedEconomics(programs);
-  const byPlanKey = new Map(programs.map(program => [
-    program.evaluation.plan.key,
-    program
-  ]));
-  const incumbent = byPlanKey.get(
-    snapshot.selected.evaluation.plan.key
-  );
-  if (!incumbent) return false;
-  if (!incumbent.evaluation.feasible ||
-      !Number.isFinite(incumbent.evaluation.cost))
-    return false;
-  const best = programs
-    .filter(program =>
-      program.evaluation.feasible &&
-      Number.isFinite(program.evaluation.cost))
-    .sort((left, right) =>
-      left.evaluation.cost - right.evaluation.cost)[0];
-  if (!best) return false;
-  if (best !== incumbent) {
-    const beta = tieBand(
-      evaluationSession,
-      snapshot.entry,
-      best,
-      incumbent,
-      reboundHazards,
-      programs
-    );
-    if (best.evaluation.cost + beta <
-        incumbent.evaluation.cost) {
-      session.racecraftTier0BetaBreaks =
-        (session.racecraftTier0BetaBreaks ?? 0) + 1;
-      return false;
-    }
-  }
-  decision.certificate = {
-    ...decision.certificate,
-    claimRevisions: currentRevisions
-  };
-  session.racecraftTier0BetaAccepts =
-    (session.racecraftTier0BetaAccepts ?? 0) + 1;
-  return true;
-}
-
 /**
  * Whether this selected analytic family owns the lateral controller now.
- * Certificate validation and installation share this predicate so a family
- * deferred behind another authority cannot later be installed from an aged
- * acquisition anchor.
+ * Installation checks the current authority directly at the owner slot.
  */
 export function racecraftSelectedLaneIsExecutable(
   session: Session,
@@ -3995,183 +4375,12 @@ export function racecraftSelectedLaneIsExecutable(
     (obligationParticipant || entry.pathPlan == null);
 }
 
-function selectedAnalyticAnchorHasAged(
-  session: Session,
-  entry: Entry,
-  neighbors: readonly Entry[]
-): boolean {
-  const decision = entry.racecraftDecision;
-  const selected = decision?.candidates.find(candidate =>
-    candidate.planNumericId === decision.selectedPlanNumericId);
-  if (!selected || selected.kind === 'hold' ||
-      selected.kind === 'brake-behind' ||
-      selected.plan.mode === 'ideal' || selected.plan.mode === 'pit' ||
-      !racecraftSelectedLaneIsExecutable(
-        session,
-        entry,
-        neighbors,
-        selected
-      ) ||
-      entry.racecraftPathPlan === selected.plan)
-    return false;
-  const first = selected.plan.anchors[0];
-  return !selected.plan.pinnedFirst || !first || first.s == null ||
-    Math.abs(first.s - entry.prog) > 1e-9 ||
-    Math.abs(first.offset - entry.latNow) > 1e-9;
-}
-
-/** The single Tier-0 validity gate. Null means the standing proof still holds. */
-export function racecraftDecisionCertificateBreakReason(
-  session: Session,
-  entry: Entry,
-  neighbors: readonly Entry[]
-): RacecraftDecisionCertificateBreakReason | null {
-  const certificate = entry.racecraftDecision?.certificate;
-  if (!certificate) return 'bootstrap';
-  const ordered = [...neighbors].sort((left, right) =>
-    left.code.localeCompare(right.code));
-  if (!sameStringArray(
-    certificate.neighborCodes,
-    ordered.map(neighbor => neighbor.code)
-  )) return 'neighbor-set';
-  const currentRevisions =
-    certificateClaimRevisions(session, ordered);
-  if (!sameRevisionRecord(
-    certificate.claimRevisions,
-    currentRevisions
-  ) && !incrementalClaimRevisionIsInsideTieBand(
-    session,
-    entry as ActiveEntry,
-    currentRevisions
-  )) return 'claim-revision';
-  if (selectedAnalyticAnchorHasAged(session, entry, ordered))
-    return 'authority';
-  if (certificate.authorityKey !==
-      racecraftDecisionAuthorityKey(session, entry, ordered))
-    return 'authority';
-  if (session.t + Number.EPSILON >= certificate.validUntil) return 'expiry';
-  return null;
-}
-
-/**
- * Absorb authority written by installation in the same arbitration epoch.
- * This does not extend a standing decision; callers use it only for a decision
- * selected or explicitly retained at the current epoch.
- */
-export function sealRacecraftDecisionCertificate(
-  session: Session,
-  entry: Entry,
-  neighbors: readonly Entry[]
-): void {
-  const decision = entry.racecraftDecision;
-  if (!decision) return;
-  decision.certificate = {
-    ...decision.certificate,
-    authorityKey: racecraftDecisionAuthorityKey(
-      session,
-      entry,
-      neighbors
-    )
-  };
-}
-
-/**
- * An installed emergency publication is retained by tracking/control proof,
- * not by a fresh argmin. Its explicit renewal may absorb the current snapshot.
- */
-export function renewPublishedEmergencyCertificate(
-  session: Session,
-  entry: Entry,
-  neighbors: readonly Entry[]
-): void {
-  const decision = entry.racecraftDecision;
-  if (!decision) return;
-  decision.certificate = makeDecisionCertificate(
-    session,
-    entry,
-    neighbors,
-    decision.certificate.selectedFamilyNumericId,
-    decision.certificate.selectedFamilyId,
-    decision.certificate.zeroHazardIdeal
-  );
-}
-
-function oneIntervalProgramWindow(
-  session: Session,
-  program: CandidateProgram,
-  sourceStartTime: number
-): CandidateProgram {
-  const count = Math.max(
-    1,
-    Math.ceil(RACECRAFT_DECISION_INTERVAL_SECONDS / TRAF_DT)
-  );
-  const stations: ProgramStation[] = [];
-  for (let sample = 0; sample <= count; sample++) {
-    const localTime = RACECRAFT_DECISION_INTERVAL_SECONDS *
-      sample / count;
-    stations.push({
-      ...programStationAtTime(
-        session.trk,
-        program.stations,
-        sourceStartTime + localTime
-      ),
-      time: localTime
-    });
-  }
-  return { ...program, stations };
-}
-
-function oneIntervalHazardWindow(
-  session: Session,
-  program: CandidateProgram,
-  hazard: Hazard,
-  sourceStartTime: number
-): Hazard {
-  const track = session.trk;
-  const start = racecraftClaimStateAtTime(
-    track,
-    hazard.claim,
-    sourceStartTime
-  );
-  const stationCount = Math.max(0, program.stations.length - 1);
-  const stations = createRacecraftClaimStations(stationCount);
-  stations.length = stationCount;
-  for (let index = 0; index < stationCount; index++) {
-    const egoStation = program.stations[index + 1]!;
-    const absoluteTime = sourceStartTime + egoStation.time;
-    const predicted = racecraftClaimStateAtTime(
-      track,
-      hazard.claim,
-      absoluteTime
-    );
-    stations.time[index] = egoStation.time;
-    stations.s[index] = predicted.s;
-    stations.v[index] = predicted.speed;
-    stations.y[index] = predicted.lateral;
-    stations.heading[index] = predicted.headingOffsetRadians;
-  }
-  return {
-    ...hazard,
-    originS: start.s,
-    originLateral: start.lateral,
-    originHeadingOffsetRadians: start.headingOffsetRadians,
-    rivalSweepGeometry: null,
-    claim: {
-      ...hazard.claim,
-      publishedAt: session.t + sourceStartTime,
-      originS: start.s,
-      originCentre: start.lateral,
-      originSpeed: start.speed,
-      originHeadingOffsetRadians: start.headingOffsetRadians,
-      stations
-    }
-  };
-}
-
 interface RelativePointStation {
   timeSeconds: number;
   longitudinalMetres: number;
   lateralMetres: number;
+  egoHeadingOffsetRadians: number;
+  rivalHeadingOffsetRadians: number;
 }
 
 /**
@@ -4233,11 +4442,7 @@ export function racecraftPointTrajectoriesMayIntersect(
 function relativePointStations(
   session: Session,
   program: CandidateProgram,
-  hazard: Hazard,
-  lateralPerturbation: {
-    stationIndex: number;
-    direction: -1 | 1;
-  } | null
+  hazard: Hazard
 ): RelativePointStation[] {
   let previousLongitudinal = signedTrackDistance(
     session.trk,
@@ -4245,25 +4450,28 @@ function relativePointStations(
     hazard.originS
   );
   const stations = new Array<RelativePointStation>(
-    hazard.claim.stations.length
+    racecraftClaimSegmentCount(hazard.claim)
   );
   for (let index = 0; index < stations.length; index++) {
-    const stationTime = hazard.claim.stations.time[index]!;
+    const stationTime = racecraftClaimSegmentEndTime(
+      hazard.claim,
+      index
+    );
+    const rival = racecraftClaimStateAtTime(
+      session.trk,
+      hazard.claim,
+      stationTime
+    );
     const ego = writeProgramStationAtTime(
       session.trk,
       program.stations,
       stationTime,
       programStationScratchA
     );
-    const perturbation =
-      lateralPerturbation?.stationIndex === index
-        ? lateralPerturbation.direction *
-          hazard.claim.lateralTrackingErrorThresholdMetres
-        : 0;
     const wrappedLongitudinal = signedTrackDistance(
       session.trk,
       ego.s,
-      hazard.claim.stations.s[index]!
+      rival.s
     );
     const longitudinalMetres = continuousRelativeTrackDistance(
       session.trk,
@@ -4274,8 +4482,9 @@ function relativePointStations(
     stations[index] = {
       timeSeconds: stationTime,
       longitudinalMetres,
-      lateralMetres:
-        hazard.claim.stations.y[index]! + perturbation - ego.lateral
+      lateralMetres: rival.lateral - ego.lateral,
+      egoHeadingOffsetRadians: ego.headingOffsetRadians,
+      rivalHeadingOffsetRadians: rival.headingOffsetRadians
     };
   }
   return stations;
@@ -4302,18 +4511,13 @@ function boundedRelativeStations(
   session: Session,
   program: CandidateProgram,
   hazard: Hazard,
-  lateralPerturbation: {
-    stationIndex: number;
-    direction: -1 | 1;
-  } | null,
   physicalMarginMetres = 0
 ): RelativePointStation[] | null {
   const work = evaluatorWork(session);
   const stations = relativePointStations(
     session,
     program,
-    hazard,
-    lateralPerturbation
+    hazard
   );
   work.boundScreenCalls++;
   if (!pointTrajectoryBound(
@@ -4335,15 +4539,14 @@ function boundProgramHazard(
   program: CandidateProgram,
   hazard: Hazard
 ): RelativePointStation[] | null {
-  if (program.bounds.has(hazard.key))
+  if (program.bounds?.has(hazard.key))
     return program.bounds.get(hazard.key) ?? null;
   const stations = boundedRelativeStations(
     session,
     program,
-    hazard,
-    null
+    hazard
   );
-  program.bounds.set(hazard.key, stations);
+  (program.bounds ??= new Map()).set(hazard.key, stations);
   return stations;
 }
 
@@ -4352,29 +4555,24 @@ function firstSweptContact(
   program: CandidateProgram,
   hazard: Hazard,
   points: readonly RelativePointStation[] =
-    relativePointStations(session, program, hazard, null),
-  physicalMarginMetres = 0,
-  lateralPerturbation: {
-    stationIndex: number;
-    direction: -1 | 1;
-  } | null = null
+    relativePointStations(session, program, hazard),
+  physicalMarginMetres = 0
 ): SweptContact | null {
   evaluatorWork(session).deterministicSweeps++;
   const origin = program.stations[0]!;
   const rivalGeometry = rivalSweepGeometry(session, hazard);
-  const originPose = relativeWorldPose(
-    worldBodyPose(
+  writeSweptPose(
+    0,
+    0,
+    writeWorldBodyPose(
       session.trk,
       origin.s,
       origin.lateral,
-      origin.headingOffsetRadians
+      origin.headingOffsetRadians,
+      egoWorldPoseScratch
     ),
     rivalGeometry.origin
   );
-  const poses = [{
-    timeSeconds: 0,
-    ...originPose
-  }];
   for (let index = 0; index < points.length; index++) {
     const point = points[index]!;
     const ego = writeProgramStationAtTime(
@@ -4383,39 +4581,33 @@ function firstSweptContact(
       point.timeSeconds,
       programStationScratchA
     );
-    const perturbation =
-      lateralPerturbation?.stationIndex === index
-        ? lateralPerturbation.direction *
-          hazard.claim.lateralTrackingErrorThresholdMetres
-        : 0;
-    const rivalWorld = perturbation === 0
-      ? rivalGeometry.stations[index]!
-      : worldBodyPose(
-          session.trk,
-          hazard.claim.stations.s[index]!,
-          hazard.claim.stations.y[index]! + perturbation,
-          hazard.claim.stations.heading[index]!
-        );
-    const pose = relativeWorldPose(
-      worldBodyPose(
+    const rivalWorld = rivalGeometry.stations[index]!;
+    writeSweptPose(
+      index + 1,
+      point.timeSeconds,
+      writeWorldBodyPose(
         session.trk,
         ego.s,
         ego.lateral,
-        ego.headingOffsetRadians
+        ego.headingOffsetRadians,
+        egoWorldPoseScratch
       ),
       rivalWorld
     );
-    poses.push({
-      timeSeconds: point.timeSeconds,
-      ...pose
-    });
   }
+  sweptPoseScratch.length = points.length + 1;
   const episodes = sweptCarContactEpisodes(
-    poses,
+    sweptPoseScratch,
     physicalMarginMetres
   );
   const first = episodes[0];
   if (!first) return null;
+  let maximumRelativeNormalSpeed = first.maximumRelativeNormalSpeed;
+  for (let index = 1; index < episodes.length; index++)
+    maximumRelativeNormalSpeed = Math.max(
+      maximumRelativeNormalSpeed,
+      episodes[index]!.maximumRelativeNormalSpeed
+    );
   const ego = writeProgramStationAtTime(
     session.trk,
     program.stations,
@@ -4426,11 +4618,7 @@ function firstSweptContact(
     time: first.startTimeSeconds,
     egoProgress: ego.progress,
     egoSpeed: ego.speed,
-    maximumRelativeNormalSpeed: Math.max(
-      ...episodes.map(episode =>
-        episode.maximumRelativeNormalSpeed)
-    ),
-    stationIndex: first.stationIndex,
+    maximumRelativeNormalSpeed,
     episodes
   };
 }
@@ -4463,22 +4651,24 @@ function extendedAuthoredProgramStations(
     { length: segmentCount + 1 },
     (_, index) => start.progress + span * index / segmentCount
   );
+  const prepared = prepareLaneStateProgram(session, entry, plan);
+  const dynamics = prepared.dynamics;
   const states = progress.map(value =>
-    laneStateAt(
+    preparedLaneStateAt(
       session,
       entry,
       value,
-      plan
+      prepared
     ));
   const caps = progress.map((value, index) => {
     const authored = states[index]!.targetSpeed;
-    return value <= speedLaw.progress.at(-1)! +
+    return value <= speedLaw.envelope.endProgress +
         Number.EPSILON
       ? Math.min(authored, speedLawAt(speedLaw, value))
       : authored;
   });
   caps[0] = Math.min(caps[0]!, start.speed);
-  const downforce = evaluatorDynamics(session, entry).downforceScale;
+  const downforce = dynamics.downforceScale;
   for (let index = segmentCount - 1; index >= 0; index--) {
     const state = states[index]!;
     const distance = (
@@ -4529,8 +4719,7 @@ function extendedAuthoredProgramStations(
       const deceleration =
         speedLaw.brakingEffort * room +
         passiveDeceleration(
-          session,
-          entry,
+          dynamics,
           speed,
           state.surfaceDrag,
           tow
@@ -4544,8 +4733,7 @@ function extendedAuthoredProgramStations(
       );
     } else {
       const acceleration = Math.max(0, driveAcceleration(
-        session,
-        entry,
+        dynamics,
         speed,
         state.curvature,
         state.dynamicMu,
@@ -4574,7 +4762,8 @@ function extendedAuthoredProgramStations(
       ),
       lateral: nextState.lateral,
       speed,
-      headingOffsetRadians: nextState.headingOffsetRadians
+      headingOffsetRadians: nextState.headingOffsetRadians,
+      familyState: nextState
     });
   }
   return extension;
@@ -4609,7 +4798,7 @@ function programExtendedToProgress(
   if (targetProgress <=
       program.stations.at(-1)!.progress + Number.EPSILON)
     return program;
-  let stations = program.authoredExtensions.get(targetProgress);
+  let stations = program.authoredExtensions?.get(targetProgress);
   if (!stations) {
     const extension = extendedAuthoredProgramStations(
       session,
@@ -4624,7 +4813,10 @@ function programExtendedToProgress(
       ...program.stations.slice(0, -1),
       ...extension
     ];
-    program.authoredExtensions.set(targetProgress, stations);
+    (program.authoredExtensions ??= new Map()).set(
+      targetProgress,
+      stations
+    );
   }
   return {
     ...program,
@@ -4632,183 +4824,17 @@ function programExtendedToProgress(
   };
 }
 
-function retainBestPlanContinuation(
-  session: Session,
-  hazard: Hazard,
-  value: BestPlanContinuation | null
-): BestPlanContinuation | null {
-  const claim = hazard.claim;
-  const retained = value
-    ? cloneBestPlanContinuation(value)
-    : null;
-  hazard.bestPlanContinuation = retained;
-  hazard.bestPlanContinuationResolved = true;
-  bestPlanContinuationByClaim.set(claim, {
-    session,
-    other: hazard.other,
-    publishedAt: claim.publishedAt,
-    publicationRevision: claim.publicationRevision,
-    predictionKey: claim.predictionKey,
-    value
-  });
-  evaluatorWork(session).rivalContinuationBuilds++;
-  return retained;
-}
-
-function bestPlanContinuationForHazard(
-  session: Session,
-  hazard: Hazard,
-  evaluationClaims: EvaluationClaimMap
-): BestPlanContinuation | null {
-  if (hazard.bestPlanContinuationResolved)
-    return hazard.bestPlanContinuation;
-  const claim = hazard.claim;
-  const shared = bestPlanContinuationByClaim.get(claim);
-  if (shared &&
-      shared.session === session &&
-      shared.other === hazard.other &&
-      shared.publishedAt === claim.publishedAt &&
-      shared.publicationRevision === claim.publicationRevision &&
-      shared.predictionKey === claim.predictionKey) {
-    hazard.bestPlanContinuation = shared.value
-      ? cloneBestPlanContinuation(shared.value)
-      : null;
-    hazard.bestPlanContinuationResolved = true;
-    evaluatorWork(session).rivalContinuationCacheHits++;
-    return hazard.bestPlanContinuation;
-  }
-  if (hazard.claim.source === 'ballistic') {
-    return retainBestPlanContinuation(session, hazard, null);
-  }
-  const rival = hazard.other;
-  let kind: RacecraftCandidateKind;
-  let sourcePlan: PathPlan;
-  let slowPointOwnerCode: string | null;
-  if (hazard.claim.source === 'rederived') {
-    const rederived = rival._racecraftRederivedProgram;
-    if (!rederived) {
-      return retainBestPlanContinuation(session, hazard, null);
-    }
-    kind = rederived.kind;
-    sourcePlan = rederived.plan;
-    slowPointOwnerCode = rederived.slowPointOwnerCode;
-  } else {
-    const installed = rival.racecraftPathPlan ?? rival.pathPlan;
-    kind = installed?.mode === 'pit'
-      ? 'hold'
-      : rival._racecraftAppliedKind ??
-        rival.racecraftDecision?.selectedKind ??
-        'ideal';
-    sourcePlan = installed ?? IDEAL_PATH_PLAN;
-    slowPointOwnerCode =
-      rival.racecraftLongitudinalProgram?.slowPointOwnerCode ?? null;
-  }
-  const familyId = racecraftStableFamilyId(
-    kind,
-    sourcePlan,
-    slowPointOwnerCode
-  );
-  if (!hazard.claim.predictionKey.endsWith(familyId)) {
-    return retainBestPlanContinuation(session, hazard, null);
-  }
-  const plan = reanchorSelectedFamily(
-    session,
-    rival,
-    sourcePlan
-  );
-  if (!plan) {
-    return retainBestPlanContinuation(session, hazard, null);
-  }
-  const speedLaw = composeCandidateSpeedLaw(
-    session,
-    rival,
-    plan,
-    slowPointOwnerCode,
-    session.entries,
-    evaluationClaims
-  );
-  const claimHorizon = hazard.claim.stations.length > 0
-    ? hazard.claim.stations.time[hazard.claim.stations.length - 1]!
-    : 0;
-  const publishedEndpoint = racecraftClaimStateAtTime(
-    session.trk,
-    hazard.claim,
-    claimHorizon
-  );
-  const endpointDistance = forwardTrackDistance(
-    session.trk,
-    rival.car.s,
-    publishedEndpoint.s
-  );
-  const continuation = {
-    plan,
-    speedLaw,
-    stations: [{
-      time: claimHorizon,
-      progress: rival.prog + endpointDistance,
-      s: publishedEndpoint.s,
-      lateral: publishedEndpoint.lateral,
-      speed: publishedEndpoint.speed,
-      headingOffsetRadians: publishedEndpoint.headingOffsetRadians
-    }],
-    evaluationClaims
-  };
-  return retainBestPlanContinuation(session, hazard, continuation);
-}
-
 function bestPlanStateAtTime(
   session: Session,
   hazard: Hazard,
-  evaluationClaims: EvaluationClaimMap,
+  _evaluationClaims: EvaluationClaimMap,
   time: number
 ): RacecraftClaimState | null {
-  const claimHorizon = hazard.claim.stations.length > 0
-    ? hazard.claim.stations.time[hazard.claim.stations.length - 1]!
-    : 0;
-  if (time <= claimHorizon + Number.EPSILON)
-    return racecraftClaimStateAtTime(
-      session.trk,
-      hazard.claim,
-      time
-    );
-  const continuation = bestPlanContinuationForHazard(
-    session,
-    hazard,
-    evaluationClaims
-  );
-  if (!continuation) return null;
-  let stations = continuation.stations;
-  if (time > stations.at(-1)!.time + Number.EPSILON) {
-    const last = stations.at(-1)!;
-    const targetProgress = last.progress +
-      PHYS.vTop * (time - last.time) +
-      session.trk.step;
-    const extension = extendedAuthoredProgramStations(
-      session,
-      hazard.other,
-      continuation.plan,
-      continuation.speedLaw,
-      continuation.stations,
-      targetProgress,
-      continuation.evaluationClaims
-    );
-    stations = [
-      ...continuation.stations.slice(0, -1),
-      ...extension
-    ];
-    continuation.stations = stations;
-  }
-  const state = programStationAtTime(
+  return racecraftClaimStateAtTime(
     session.trk,
-    stations,
+    hazard.claim,
     time
   );
-  return {
-    s: state.s,
-    lateral: state.lateral,
-    speed: state.speed,
-    headingOffsetRadians: state.headingOffsetRadians
-  };
 }
 
 /**
@@ -4821,22 +4847,18 @@ function offHorizonAttackContact(
   session: Session,
   entry: ActiveEntry,
   program: CandidateProgram,
-  hazard: Hazard,
-  lateralPerturbation: {
-    stationIndex: number;
-    direction: -1 | 1;
-  } | null = null
+  hazard: Hazard
 ): SweptContact | null {
   const plan = program.evaluation.plan;
   if (plan.mode === 'ideal' || plan.mode === 'pit' ||
       (plan.mode !== 'side-inside' && plan.mode !== 'side-outside'))
     return null;
   const start = program.stations.at(-1)!;
-  const targetProgress = plan.anchors
-    .map(anchor => anchor.s)
-    .filter((value): value is number =>
-      value != null && value > start.progress + Number.EPSILON)
-    .at(-1);
+  let targetProgress: number | null = null;
+  for (const anchor of plan.anchors)
+    if (anchor.s != null &&
+        anchor.s > start.progress + Number.EPSILON)
+      targetProgress = anchor.s;
   if (targetProgress == null ||
       targetProgress - entry.prog > session.trk.len / 2)
     return null;
@@ -4846,60 +4868,63 @@ function offHorizonAttackContact(
     program,
     targetProgress
   ).stations;
-  const extensionStart = Math.max(
-    0,
-    fullExtension.findIndex(station =>
-      station.time >= start.time - Number.EPSILON)
-  );
-  const extension = fullExtension.slice(extensionStart);
-  const perturbation = lateralPerturbation &&
-      lateralPerturbation.stationIndex ===
-        Math.max(0, hazard.claim.stations.length - 1)
-    ? lateralPerturbation.direction *
-      hazard.claim.lateralTrackingErrorThresholdMetres
-    : 0;
-  const poses = [];
-  for (const station of extension) {
-    const rival = bestPlanStateAtTime(
-      session,
-      hazard,
-      program.evaluationClaims,
-      station.time
-    );
-    if (!rival) return null;
-    const pose = relativeWorldBodyPose(
+  let extensionStart = 0;
+  while (extensionStart < fullExtension.length &&
+      fullExtension[extensionStart]!.time <
+        start.time - Number.EPSILON)
+    extensionStart++;
+  let poseCount = 0;
+  for (let index = extensionStart;
+    index < fullExtension.length;
+    index++) {
+    const station = fullExtension[index]!;
+    const rival = writeRacecraftClaimStateAtTime(
       session.trk,
-      station,
-      {
-        s: rival.s,
-        lateral: rival.lateral + perturbation,
-        headingOffsetRadians: rival.headingOffsetRadians
-      }
+      hazard.claim,
+      station.time,
+      offHorizonRivalStateScratch
     );
-    poses.push({
-      timeSeconds: station.time,
-      ...pose
-    });
+    writeSweptPose(
+      poseCount++,
+      station.time,
+      writeWorldBodyPose(
+        session.trk,
+        station.s,
+        station.lateral,
+        station.headingOffsetRadians,
+        egoWorldPoseScratch
+      ),
+      writeWorldBodyPose(
+        session.trk,
+        rival.s,
+        rival.lateral,
+        rival.headingOffsetRadians,
+        rivalWorldPoseScratch
+      )
+    );
   }
-  const episodes = sweptCarContactEpisodes(poses);
+  sweptPoseScratch.length = poseCount;
+  const episodes = sweptCarContactEpisodes(sweptPoseScratch);
   const first = episodes[0];
   if (!first ||
       first.startTimeSeconds <= start.time + Number.EPSILON)
     return null;
+  let maximumRelativeNormalSpeed = first.maximumRelativeNormalSpeed;
+  for (let index = 1; index < episodes.length; index++)
+    maximumRelativeNormalSpeed = Math.max(
+      maximumRelativeNormalSpeed,
+      episodes[index]!.maximumRelativeNormalSpeed
+    );
   const ego = programStationAtTime(
     session.trk,
-    extension,
+    fullExtension,
     first.startTimeSeconds
   );
   return {
     time: first.startTimeSeconds,
     egoProgress: ego.progress,
     egoSpeed: ego.speed,
-    maximumRelativeNormalSpeed: Math.max(
-      ...episodes.map(episode =>
-        episode.maximumRelativeNormalSpeed)
-    ),
-    stationIndex: Math.max(0, hazard.claim.stations.length - 1),
+    maximumRelativeNormalSpeed,
     episodes
   };
 }
@@ -4943,7 +4968,6 @@ function programHazardClearance(
   hazard: Hazard,
   points: readonly RelativePointStation[]
 ): {
-  stationIndex: number;
   clearanceMetres: number;
 } {
   let relativeLongitudinal = signedTrackDistance(
@@ -4953,36 +4977,24 @@ function programHazardClearance(
   );
   let relativeLateral =
     hazard.originLateral - program.stations[0]!.lateral;
-  let previousTime = 0;
+  let previousEgoHeading =
+    program.stations[0]!.headingOffsetRadians;
   let previousOtherHeading =
     hazard.originHeadingOffsetRadians;
   let minimumClearance = Infinity;
-  let bindingStationIndex = -1;
   for (let index = 0; index < points.length; index++) {
     const point = points[index]!;
-    const ego = writeProgramStationAtTime(
-      session.trk,
-      program.stations,
-      point.timeSeconds,
-      programStationScratchA
-    );
-    const egoPrevious = writeProgramStationAtTime(
-      session.trk,
-      program.stations,
-      previousTime,
-      programStationScratchB
-    );
     const egoHeading = normAng(
-      egoPrevious.headingOffsetRadians +
+      previousEgoHeading +
       normAng(
-        ego.headingOffsetRadians -
-        egoPrevious.headingOffsetRadians
+        point.egoHeadingOffsetRadians -
+        previousEgoHeading
       ) / 2
     );
     const rivalHeading = normAng(
       previousOtherHeading +
       normAng(
-        hazard.claim.stations.heading[index]! -
+        point.rivalHeadingOffsetRadians -
         previousOtherHeading
       ) / 2
     );
@@ -4996,125 +5008,71 @@ function programHazardClearance(
     );
     if (clearance.clearanceMetres < minimumClearance) {
       minimumClearance = clearance.clearanceMetres;
-      if (index === 0 || clearance.fraction >= 0.5) {
-        bindingStationIndex = index;
-      } else {
-        bindingStationIndex = index - 1;
-      }
     }
     relativeLongitudinal = point.longitudinalMetres;
     relativeLateral = point.lateralMetres;
-    previousTime = point.timeSeconds;
-    previousOtherHeading = hazard.claim.stations.heading[index]!;
+    previousEgoHeading = point.egoHeadingOffsetRadians;
+    previousOtherHeading = point.rivalHeadingOffsetRadians;
   }
   return {
-    stationIndex: bindingStationIndex,
     clearanceMetres: minimumClearance
   };
+}
+
+function nearRubHazardLossSeconds(
+  session: Session,
+  program: CandidateProgram,
+  hazard: Hazard,
+  samples: MutableNearRubTrajectorySample[]
+): number {
+  samples.length = program.stations.length;
+  for (let index = 0; index < program.stations.length; index++) {
+    const ego = program.stations[index]!;
+    const rival = racecraftClaimStateAtTime(
+      session.trk,
+      hazard.claim,
+      ego.time
+    );
+    const sample = samples[index] ?? (samples[index] = {
+      timeSeconds: 0,
+      longitudinalCentreDistanceMetres: 0,
+      lateralCentreDistanceMetres: 0,
+      egoHeadingOffsetRadians: 0,
+      rivalHeadingOffsetRadians: 0
+    });
+    sample.timeSeconds = ego.time;
+    sample.longitudinalCentreDistanceMetres = signedTrackDistance(
+      session.trk,
+      ego.s,
+      rival.s
+    );
+    sample.lateralCentreDistanceMetres = rival.lateral - ego.lateral;
+    sample.egoHeadingOffsetRadians = ego.headingOffsetRadians;
+    sample.rivalHeadingOffsetRadians = rival.headingOffsetRadians;
+  }
+  return plannedNearRubExposureCost(
+    samples,
+    racecraftCalibration().nearRubClearanceMetres,
+    program.defensiveLegality?.legal &&
+      program.defensiveLegality.targetCode === hazard.other.code &&
+      program.defensiveLegality.approachConflictAuthorized &&
+      program.defensiveLegality.noticeDeadlineSessionTimeSeconds != null &&
+      program.defensiveLegality.turnInSessionTimeSeconds != null
+      ? [{
+          startTimeSeconds:
+            program.defensiveLegality
+              .noticeDeadlineSessionTimeSeconds - session.t,
+          endTimeSeconds:
+            program.defensiveLegality
+              .turnInSessionTimeSeconds - session.t
+        }]
+      : []
+  ).lossSeconds;
 }
 
 function damagingContact(contact: SweptContact | null): boolean {
   return contact != null &&
     isHardContactImpulse(contact.maximumRelativeNormalSpeed);
-}
-
-function conditionedResponseProgram(
-  session: Session,
-  current: CandidateProgram,
-  conditionedBaseline: CandidateProgram,
-  response: CandidateProgram,
-  delaySeconds: number
-): CandidateProgram {
-  const stations = new Array<ProgramStation>(current.stations.length);
-  for (let index = 0; index < current.stations.length; index++) {
-    const station = current.stations[index]!;
-    if (station.time <= delaySeconds + Number.EPSILON) {
-      stations[index] = { ...station };
-      continue;
-    }
-    const responseTime = station.time - delaySeconds;
-    const responseBase = writeProgramStationAtTime(
-      session.trk,
-      response.stations,
-      responseTime,
-      programStationScratchA
-    );
-    const conditionedBase = writeProgramStationAtTime(
-      session.trk,
-      conditionedBaseline.stations,
-      responseTime,
-      programStationScratchB
-    );
-    const progressDelta =
-      responseBase.progress - conditionedBase.progress;
-    const progress = station.progress + progressDelta;
-    stations[index] = {
-      time: station.time,
-      progress,
-      s: wrappedTrackS(session.trk, station.s + progressDelta),
-      lateral: station.lateral +
-        responseBase.lateral - conditionedBase.lateral,
-      speed: Math.max(
-        0,
-        station.speed + responseBase.speed - conditionedBase.speed
-      ),
-      headingOffsetRadians: normAng(
-        station.headingOffsetRadians +
-        normAng(
-          responseBase.headingOffsetRadians -
-          conditionedBase.headingOffsetRadians
-        )
-      )
-    };
-  }
-  return {
-    ...response,
-    stations,
-    // The conditioned prefix changes the extension's initial state. Reusing
-    // the source response's progress-keyed tail would splice stations
-    // authored from a different state into this program.
-    authoredExtensions: new Map()
-  };
-}
-
-function clearsOneIntervalPhysicalBound(
-  session: Session,
-  program: CandidateProgram,
-  hazards: readonly Hazard[],
-  sourceStartTime: number
-): boolean {
-  const localProgram = oneIntervalProgramWindow(
-    session,
-    program,
-    sourceStartTime
-  );
-  for (const hazard of hazards) {
-    const localHazard = oneIntervalHazardWindow(
-      session,
-      localProgram,
-      hazard,
-      sourceStartTime
-    );
-    const physicalBound = oneIntervalPhysicalDivergence(
-      session,
-      hazard.other
-    );
-    const points = boundedRelativeStations(
-      session,
-      localProgram,
-      localHazard,
-      null,
-      physicalBound
-    );
-    if (points && damagingContact(firstSweptContact(
-      session,
-      localProgram,
-      localHazard,
-      points,
-      physicalBound
-    ))) return false;
-  }
-  return true;
 }
 
 /**
@@ -5123,10 +5081,8 @@ function clearsOneIntervalPhysicalBound(
  */
 function violatesOneIntervalViability(
   session: Session,
-  entry: ActiveEntry,
   program: CandidateProgram,
-  hazards: readonly Hazard[],
-  responsePrograms: readonly CandidateProgram[]
+  hazards: readonly Hazard[]
 ): boolean {
   if (!hazards.length) return false;
   const screened: Array<{
@@ -5143,13 +5099,11 @@ function violatesOneIntervalViability(
       session,
       program,
       hazard,
-      null,
       physicalBound
     );
     if (points) screened.push({ hazard, physicalBound, points });
   }
   if (!screened.length) return false;
-  const screenedHazards = screened.map(value => value.hazard);
   const work = evaluatorWork(session);
   work.viabilityCalls++;
   work.viabilityHazards += screened.length;
@@ -5166,42 +5120,7 @@ function violatesOneIntervalViability(
         contact!.time <= nextDecision)
       return true;
   }
-  if (clearsOneIntervalPhysicalBound(
-    session,
-    program,
-    screenedHazards,
-    nextDecision
-  ))
-    return false;
-
-  const atNextDecision = programStationAtTime(
-    session.trk,
-    program.stations,
-    nextDecision
-  );
-  const conditionedActuation =
-    PATH_FOLLOWER_SETTLE_DISTANCE /
-      Math.max(Number.EPSILON, atNextDecision.speed);
-  const clearsWith = (response: CandidateProgram): boolean => {
-    if (!response.evaluation.feasible ||
-        response === program) return false;
-    const delayed = conditionedResponseProgram(
-      session,
-      program,
-      program,
-      response,
-      nextDecision + conditionedActuation
-    );
-    return clearsOneIntervalPhysicalBound(
-      session,
-      delayed,
-      screenedHazards,
-      nextDecision
-    );
-  };
-  for (const response of responsePrograms)
-    if (clearsWith(response)) return false;
-  return true;
+  return false;
 }
 
 function arrivalTimeOnProgram(
@@ -5221,433 +5140,501 @@ function arrivalTimeOnProgram(
     Math.max(Number.EPSILON, last.speed);
 }
 
-function programStationAtProgress(
+function trajectoryFromCandidate(
   session: Session,
   entry: ActiveEntry,
   program: CandidateProgram,
   targetProgress: number
-): ProgramStation {
-  if (targetProgress <=
-      program.stations.at(-1)!.progress + Number.EPSILON)
-    return programStationAtTime(
-      session.trk,
-      program.stations,
-      arrivalTimeOnProgram(program.stations, targetProgress)
-    );
-  return extendAuthoredProgramToProgress(
+): RacecraftTrajectory {
+  const candidate = candidateTimedTrajectory(
     session,
     entry,
-    program.evaluation.plan,
-    program.speedLaw,
-    program.stations,
-    targetProgress,
-    program.evaluationClaims
-  );
-}
-
-/**
- * Q starts after the shared prefix. Compare arrival at the incumbent's
- * continuation endpoint so neither the present acquisition nor the
- * pre-observation prefix can be counted a second time.
- */
-function incrementalContinuationTimeSeconds(
-  session: Session,
-  entry: ActiveEntry,
-  current: CandidateProgram,
-  response: CandidateProgram,
-  baseline?: {
-    targetProgress: number;
-    referenceSpeed: number;
-    currentSeconds: number;
-  }
-): number {
-  const targetProgress =
-    baseline?.targetProgress ?? current.stations.at(-1)!.progress;
-  const referenceSpeed = baseline?.referenceSpeed ?? (
-    session.trk.idealPath.v[
-      indexAtProgress(session.trk, entry, targetProgress)
-    ]! * evaluatorDynamics(session, entry).margin
-  );
-  const responseStation = programStationAtProgress(
-    session,
-    entry,
-    response,
+    program,
     targetProgress
   );
-  const currentSeconds = baseline?.currentSeconds ?? (
-    arrivalTimeOnProgram(current.stations, targetProgress) +
-    terminalContinuationSeconds(
-      session,
-      entry,
-      targetProgress,
-      programSpeedAtProgress(current.stations, targetProgress),
-      referenceSpeed,
-      current.speedLaw.brakingEffort
-    )
-  );
-  return responseStation.time +
-    terminalContinuationSeconds(
-      session,
-      entry,
-      targetProgress,
-      responseStation.speed,
-      referenceSpeed,
-      response.speedLaw.brakingEffort
-    ) - currentSeconds;
+  return {
+    ...candidate.timed,
+    fromSessionTimeSeconds: session.t,
+    toSessionTimeSeconds:
+      candidate.evaluateUntilSessionTimeSeconds
+  };
 }
 
-interface EarliestArrivalFamily {
-  session: Session;
-  at: number;
-  progress: number;
-  trackS: number;
-  speed: number;
-  lateral: number;
-  programs: Array<{
-    plan: DynamicPlan;
-    speedLaw: CandidateSpeedLaw;
-    stations: ProgramStation[];
-  }>;
+function trajectoryRemainsOnNormalSurface(
+  session: Session,
+  trajectory: RacecraftTrajectory
+): boolean {
+  const times = [
+    trajectory.fromSessionTimeSeconds,
+    trajectory.toSessionTimeSeconds
+  ];
+  for (let index = 0;
+    index < trajectory.trajectory.segmentCount;
+    index++) {
+    const time =
+      trajectory.authoredAtSessionTimeSeconds +
+      trajectory.trajectory.segmentEndTime[index]! -
+      trajectory.trajectoryTimeOffsetSeconds;
+    if (time > trajectory.fromSessionTimeSeconds &&
+        time < trajectory.toSessionTimeSeconds)
+      times.push(time);
+  }
+  for (const time of times) {
+    const point = continuousTrajectoryStateAtTime(
+      session.trk,
+      trajectory,
+      time
+    );
+    const index = cyclicIndex(
+      session.trk,
+      Math.round(point.s / session.trk.step)
+    );
+    const envelope = normalLateralEnvelope(session.trk, index);
+    if (point.lateral <
+          envelope.minimum - Number.EPSILON ||
+        point.lateral >
+          envelope.maximum + Number.EPSILON)
+      return false;
+  }
+  return true;
 }
 
-const earliestArrivalFamilyCache =
-  new WeakMap<Entry, EarliestArrivalFamily>();
-
-function earliestFeasibleArrival(
+function cornerExitProgress(
   session: Session,
   entry: ActiveEntry,
-  contestedS: number
+  corner: LegacyCorner
 ): number {
-  const track = session.trk;
-  const targetProgress = entry.prog +
-    forwardTrackDistance(track, entry.car.s, contestedS);
-  let cached = earliestArrivalFamilyCache.get(entry);
-  if (!cached || cached.session !== session ||
-      cached.at !== session.t ||
-      cached.progress !== entry.prog ||
-      cached.trackS !== entry.car.s ||
-      cached.speed !== entry.spd ||
-      cached.lateral !== entry.latNow) {
-    const plans: DynamicPlan[] = [
-      acquisitionPlan(session, entry, 'ideal')
-    ];
-    const corner = cornerAtApproach(
-      track,
-      cyclicIndex(track, entry.car.progIdx)
-    );
-    for (const [kind, side] of [
-      ['corner-inside', -1],
-      ['corner-outside', 1]
-    ] as const) {
-      const full = corner
-        ? fullCornerPlan(session, entry, corner, kind, null)
-        : straightFullPlan(session, entry, side, null);
-      const seeded = full
-        ? seededSideCandidate(session, entry, [], kind, full, false, false)
-        : null;
-      if (seeded &&
-          seeded.plan.mode !== 'ideal' &&
-          seeded.plan.mode !== 'pit')
-        plans.push(seeded.plan);
-    }
-    const programs: EarliestArrivalFamily['programs'] = [];
-    for (const plan of plans) {
-      if (!candidateRespectsAgreement(session, entry, plan))
-        continue;
-      const speedLaw = composeCandidateSpeedLaw(
-        session,
-        entry,
-        plan,
-        null,
-        [],
-        EMPTY_EVALUATION_CLAIMS,
-        BOT_BRAKING_EFFORT_MAXIMUM
+  return entry.prog + distanceAhead(
+    session.trk,
+    cyclicIndex(session.trk, entry.car.progIdx),
+    corner.exitI
+  );
+}
+
+function timedTrajectoryFromPublication(
+  claim: RacecraftClaim
+): RacecraftTimedTrajectoryProgram {
+  return {
+    ownerCode: claim.code,
+    publicationRevision: claim.publicationRevision,
+    authoredAtSessionTimeSeconds: claim.publishedAt,
+    trajectoryTimeOffsetSeconds: claim.trajectoryTimeOffsetSeconds,
+    trajectory: claim.trajectory
+  };
+}
+
+let candidateTrajectoryConstructionScratch:
+  RacecraftTrajectoryProgram | null = null;
+
+function candidateTrajectoryConstructionProgram(
+  capacity: number,
+  originProgress: number,
+  originTrackS: number,
+  lateralProgram: RacecraftTrajectoryProgram['lateralProgram']
+): RacecraftTrajectoryProgram {
+  const scratch = candidateTrajectoryConstructionScratch;
+  if (!scratch || scratch.segmentCount !== capacity) {
+    candidateTrajectoryConstructionScratch =
+      createRacecraftTrajectoryProgram(
+        capacity,
+        originProgress,
+        originTrackS,
+        lateralProgram
       );
-      programs.push({
-        plan,
-        speedLaw,
-        stations: programStations(
-          session,
-          entry,
-          plan,
-          speedLaw
-        )
-      });
-    }
-    cached = {
-      session,
-      at: session.t,
-      progress: entry.prog,
-      trackS: entry.car.s,
-      speed: entry.spd,
-      lateral: entry.latNow,
-      programs
-    };
-    earliestArrivalFamilyCache.set(entry, cached);
-    evaluatorWork(session).arrivalFamilyBuilds++;
-  } else {
-    evaluatorWork(session).arrivalFamilyCacheHits++;
+    return candidateTrajectoryConstructionScratch;
   }
-  let earliest = Infinity;
-  for (const program of cached.programs) {
-    const stations = program.stations;
-    const arrival = targetProgress >
-        stations.at(-1)!.progress + Number.EPSILON
-      ? extendAuthoredProgramToProgress(
-          session,
-          entry,
-          program.plan,
-          program.speedLaw,
-          stations,
-          targetProgress
-        ).time
-      : arrivalTimeOnProgram(stations, targetProgress);
-    earliest = Math.min(
-      earliest,
-      arrival
-    );
-  }
-  return Number.isFinite(earliest)
-    ? earliest
-    : forwardTrackDistance(track, entry.car.s, contestedS) /
-      Math.max(Number.EPSILON, entry.spd);
+  candidateTrajectoryConstructionScratch = {
+    ...scratch,
+    originProgress,
+    originTrackS,
+    lateralProgram
+  };
+  return candidateTrajectoryConstructionScratch;
 }
 
-export function racecraftContestedRegionResponsibility(
-  region: RacecraftContestedRegion | null,
-  ownArrivalSeconds: number,
-  rivalArrivalSeconds: number
-): number {
-  if (!region) return 1;
-  return arrivalQuantizedResponsibility(
-    ownArrivalSeconds - rivalArrivalSeconds,
-    RACECRAFT_DECISION_INTERVAL_SECONDS
-  );
-}
-
-function responsibility(
+function candidateTimedTrajectory(
   session: Session,
   entry: ActiveEntry,
-  hazard: Hazard
-): number {
-  if (hazard.region === undefined)
-    hazard.region = hazard.ownClaim
-      ? snapshotContestedRegion(
-          session.trk,
-          hazard.ownClaim,
-          hazard.claim
-        )
-      : null;
-  // A candidate that creates an intersection absent from the immutable
-  // snapshot owns that novel contest completely. Snapshot-derived arrival
-  // asymmetry remains authoritative for contests that already existed.
-  if (!hazard.region)
-    return racecraftContestedRegionResponsibility(null, 0, 0);
-  const contestedS = hazard.region.s;
-  const ownEta = earliestFeasibleArrival(session, entry, contestedS);
-  const rivalEta = earliestFeasibleArrival(
+  program: CandidateProgram,
+  targetProgress: number
+): {
+  timed: RacecraftTimedTrajectoryProgram;
+  evaluateUntilSessionTimeSeconds: number;
+} {
+  const extended = programExtendedToProgress(
     session,
-    hazard.other,
-    contestedS
+    entry,
+    program,
+    targetProgress
   );
-  return racecraftContestedRegionResponsibility(
-    hazard.region,
-    ownEta,
-    rivalEta
+  const stations = extended.stations;
+  // Candidate construction is consumed synchronously. Any selected defensive
+  // envelope is cloned by the legality author before this scratch is reused.
+  const trajectory = candidateTrajectoryConstructionProgram(
+    Math.max(0, stations.length - 1),
+    stations[0]!.progress,
+    stations[0]!.s,
+    program.evaluation.plan.mode === 'pit'
+      ? null
+      : compileCompactLateralProgram(
+          session.trk,
+          program.evaluation.plan
+        )
   );
+  for (let index = 1; index < stations.length; index++) {
+    const from = stations[index - 1]!;
+    const to = stations[index]!;
+    writeRacecraftTrajectorySegment(trajectory, index - 1, {
+      startTimeSeconds: from.time,
+      endTimeSeconds: to.time,
+      startProgressMetres: from.progress,
+      endProgressMetres: to.progress,
+      startSpeedMetresPerSecond: from.speed,
+      endSpeedMetresPerSecond: to.speed,
+      startLateralMetres: from.lateral,
+      endLateralMetres: to.lateral,
+      startHeadingOffsetRadians: from.headingOffsetRadians,
+      endHeadingOffsetRadians: to.headingOffsetRadians
+    });
+  }
+  const publicationRevision = Math.max(
+    entry._racecraftLastPublicationRevision ?? -1,
+    session.racecraftClaims?.get(entry.code)
+      ?.publicationRevision ?? -1
+  ) + 1;
+  return {
+    timed: {
+      ownerCode: entry.code,
+      publicationRevision,
+      authoredAtSessionTimeSeconds: session.t,
+      trajectoryTimeOffsetSeconds: 0,
+      trajectory
+    },
+    evaluateUntilSessionTimeSeconds:
+      session.t + stations.at(-1)!.time
+  };
 }
 
-function brakingCompletionSeconds(
+function defendedCorner(
   session: Session,
   entry: ActiveEntry,
-  current: CandidateProgram,
-  response: CandidateProgram,
-  hazardTime: number
-): number {
-  const downforceScale = evaluatorDynamics(session, entry).downforceScale;
-  const targetTime = Math.max(0, hazardTime);
-  const target = programStationAtTime(
-    session.trk,
-    response.stations,
-    targetTime
-  );
-  const samples = current.stations
-    .filter(station => station.time < targetTime - Number.EPSILON)
-    .map(station => ({ ...station }));
-  samples.push(programStationAtTime(
-    session.trk,
-    current.stations,
-    targetTime
-  ));
-  if (target.speed >= samples[0]!.speed - Number.EPSILON) return 0;
+  program: CandidateProgram,
+  attacker: ReturnType<typeof activeDefensiveAttacker>
+): LegacyCorner | null {
+  const existing = entry.racecraftDefensiveCommitment ??
+    session.racecraftClaims?.get(entry.code)?.defensiveCommitment ??
+    null;
+  if (racecraftDefensiveCommitmentIsActive(existing, entry.prog)) {
+    const committed = session.trk.corners.find(corner =>
+      corner.id === existing.cornerId);
+    if (committed) return committed;
+  }
+  const plan = program.evaluation.plan;
+  const cornerId = attacker?.claim.cornerId ??
+    (plan.mode !== 'ideal' && plan.mode !== 'pit'
+      ? plan.cornerId ?? null
+      : null);
+  const authored = cornerId == null
+    ? null
+    : session.trk.corners.find(corner => corner.id === cornerId) ??
+      null;
+  return authored ??
+    cornerAtApproach(
+      session.trk,
+      cyclicIndex(session.trk, entry.car.progIdx)
+    ) ??
+    nextCorner(session.trk, entry.car.progIdx);
+}
 
-  const allowed = new Array<number>(samples.length);
-  allowed[allowed.length - 1] = target.speed;
-  for (let index = samples.length - 2; index >= 0; index--) {
-    const from = samples[index]!;
-    const to = samples[index + 1]!;
-    const state = laneStateAt(
+function applyDefensiveLegality(
+  session: Session,
+  entry: ActiveEntry,
+  entries: readonly Entry[],
+  programs: readonly CandidateProgram[],
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[]
+): ReturnType<typeof activeDefensiveAttacker> {
+  const attacker = activeDefensiveAttacker(
+    session,
+    entry,
+    entries,
+    actionableOwnershipViews
+  );
+  if (!attacker) return null;
+  const previousPublication =
+    session.racecraftClaims?.get(entry.code);
+  const previousDefenderTrajectory = previousPublication
+    ? timedTrajectoryFromPublication(previousPublication)
+    : null;
+  const attackerTrajectory =
+    timedTrajectoryFromPublication(attacker.claim);
+  const attackerAlreadyAlongside =
+    racecraftMeasuredLegalAlongside(
       session,
       entry,
-      from.progress,
-      current.evaluation.plan
+      attacker.entry,
+      attacker.side
     );
-    const distance = Math.max(
-      0,
-      (to.progress - from.progress) * state.q
+  const existingCommitment =
+    entry.racecraftDefensiveCommitment ??
+    previousPublication?.defensiveCommitment ??
+    null;
+  for (const program of programs) {
+    if (!program.evaluation.feasible) continue;
+    const corner = defendedCorner(
+      session,
+      entry,
+      program,
+      attacker
     );
-    allowed[index] = backwardInducedSpeedLimit(
-      allowed[index + 1]!,
-      from.speed,
-      distance,
-      state.curvature,
-      state.dynamicMu,
-      downforceScale,
-      response.speedLaw.brakingEffort,
-      passiveDeceleration(
-        session,
-        entry,
-        from.speed,
-        state.surfaceDrag
+    if (!corner) continue;
+    const exitProgress = cornerExitProgress(
+      session,
+      entry,
+      corner
+    );
+    const turnInProgress = entry.prog + distanceAhead(
+      session.trk,
+      cyclicIndex(session.trk, entry.car.progIdx),
+      corner.turnInI
+    );
+    const candidate = candidateTimedTrajectory(
+      session,
+      entry,
+      program,
+      turnInProgress
+    );
+    const ownershipProtectsRoom =
+      actionableOwnershipViews.some(view =>
+        view.assertion.attackerCode === attacker.entry.code &&
+        view.assertion.targetCode === entry.code &&
+        view.assertion.cornerId === corner.id &&
+        view.assertion.side === attacker.side &&
+        (
+          view.assertion.authoredOutcome === 'attacker-owned' ||
+          view.assertion.authoredOutcome === 'shared'
+        ));
+    const plan = program.evaluation.plan;
+    const result = evaluateRacecraftDefensiveLegality({
+      session,
+      defender: entry,
+      attacker: attacker.entry,
+      attackerPublicationRevision:
+        attacker.claim.publicationRevision,
+      coveredSide: attacker.side,
+      corner,
+      cornerExitProgressMetres: exitProgress,
+      previousDefenderTrajectory,
+      candidateDefenderTrajectory: candidate.timed,
+      attackerTrajectory,
+      candidateLongitudinalProgram: {
+        envelope: program.speedLaw.envelope,
+        brakingEffort: program.speedLaw.brakingEffort,
+        slowPointOwnerCode:
+          program.speedLaw.longitudinalOwnerCode,
+        bindingSlowPoint: program.speedLaw.slowPoint
+      },
+      evaluateUntilSessionTimeSeconds:
+        candidate.evaluateUntilSessionTimeSeconds,
+      existingCommitment,
+      attackerAlreadyAlongside,
+      ownershipProtectsRoom,
+      safetyOnly:
+        plan.mode !== 'ideal' &&
+        plan.mode !== 'pit' &&
+        plan.surfaceAuthorization === 'emergency'
+    });
+    program.defensiveLegality = result;
+    if (result.legal) continue;
+    const reason = result.rejectionReason ??
+      'timing-unproved';
+    const veto = `defensive-${reason}`;
+    if (!program.evaluation.vetoes.includes(veto))
+      program.evaluation.vetoes.push(veto);
+    program.evaluation.feasible = false;
+    recordRacecraftDefensiveCandidateRejection(
+      session,
+      reason
+    );
+  }
+  return attacker;
+}
+
+function ownershipAllowsNominalContact(
+  session: Session,
+  entry: ActiveEntry,
+  program: CandidateProgram,
+  hazard: Hazard,
+  allowOutgoingAssertion = true
+): boolean {
+  const plan = program.evaluation.plan;
+  if (plan.mode === 'ideal' || plan.mode === 'pit' ||
+      (plan.mode !== 'side-inside' &&
+        plan.mode !== 'side-outside') ||
+      plan.surfaceAuthorization === 'emergency')
+    return false;
+
+  const outgoingAttack =
+    plan.leaderCode === hazard.other.code &&
+    plan.cornerId != null;
+  if (outgoingAttack) {
+    if (!allowOutgoingAssertion) return false;
+    const corner = session.trk.corners.find(value =>
+      value.id === plan.cornerId);
+    if (!corner || !hazard.claim.trusted) return false;
+    const exitProgress = cornerExitProgress(session, entry, corner);
+    const authoredEnd = plan.anchors
+      .map(anchor => anchor.s)
+      .filter((value): value is number => value != null)
+      .at(-1);
+    if (authoredEnd == null ||
+        authoredEnd + Number.EPSILON < exitProgress)
+      return false;
+    const attackerTrajectory = trajectoryFromCandidate(
+      session,
+      entry,
+      program,
+      exitProgress
+    );
+    if (!trajectoryRemainsOnNormalSurface(
+      session,
+      attackerTrajectory
+    )) return false;
+    const leaderTrajectory = trajectoryFromPublication(
+      session,
+      hazard.claim
+    );
+    const terminal = continuousTrajectoryStateAtTime(
+      session.trk,
+      attackerTrajectory,
+      attackerTrajectory.toSessionTimeSeconds
+    );
+    const leaderOrigin = continuousTrajectoryStateAtTime(
+      session.trk,
+      leaderTrajectory,
+      leaderTrajectory.fromSessionTimeSeconds
+    );
+    const side: -1 | 1 =
+      terminal.lateral < leaderOrigin.lateral ? -1 : 1;
+    const assertion = authorCornerOwnershipAssertion({
+      session,
+      corner,
+      attackerCode: entry.code,
+      targetCode: hazard.other.code,
+      attackerTrajectory,
+      leaderTrajectory,
+      attackerPublicationRevision:
+        attackerTrajectory.publicationRevision,
+      sourceLeaderPublicationRevision:
+        hazard.claim.publicationRevision,
+      selectedPlanNumericId: program.evaluation.planNumericId,
+      selectedFamilyNumericId: program.evaluation.familyNumericId,
+      side
+    });
+    if (!assertion) return false;
+    program.ownershipAssertion = assertion;
+    return true;
+  }
+
+  const attackerAssertion = hazard.claim.ownershipAssertion;
+  const currentLeaderPublication =
+    session.racecraftClaims?.get(entry.code);
+  if (!attackerAssertion ||
+      !program.actionableOwnershipViews.some(view =>
+        view.assertion === attackerAssertion) ||
+      attackerAssertion.targetCode !== entry.code ||
+      attackerAssertion.attackerCode !== hazard.other.code ||
+      attackerAssertion.attackerPublicationRevision !==
+        hazard.claim.publicationRevision ||
+      currentLeaderPublication?.publicationRevision !==
+        attackerAssertion.sourceLeaderPublicationRevision)
+    return false;
+  const corner = session.trk.corners.find(value =>
+    value.id === attackerAssertion.cornerId);
+  if (!corner) return false;
+  const exitProgress = cornerExitProgress(session, entry, corner);
+  const leaderTrajectory = trajectoryFromCandidate(
+    session,
+    entry,
+    program,
+    exitProgress
+  );
+  if (!trajectoryRemainsOnNormalSurface(session, leaderTrajectory))
+    return false;
+  const attackerTrajectory = trajectoryFromPublication(
+    session,
+    hazard.claim
+  );
+  const resolution = classifyCornerOwnership(
+    session.trk,
+    corner,
+    leaderTrajectory,
+    attackerTrajectory
+  );
+  if (resolution.outcome !== 'attacker-owned') return false;
+  if (!racecraftDefensiveLegalityAuthorizesReclaim(
+    program.defensiveLegality
+  )) return false;
+  program.defenderReclaim = true;
+  return true;
+}
+
+function nominalContactEpisodesAreAuthorized(
+  session: Session,
+  entry: ActiveEntry,
+  program: CandidateProgram,
+  hazard: Hazard,
+  contact: SweptContact
+): boolean {
+  const defense = program.defensiveLegality;
+  const matchingDefense = defense?.legal &&
+    defense.targetCode === hazard.other.code &&
+    (
+      defense.classification === 'new-move' ||
+      defense.classification === 'continuation'
+    );
+  if (matchingDefense && defense.roomProtected) return false;
+  const cornerAuthorityNeeded = contact.episodes.some(episode =>
+    matchingDefense &&
+    defense.turnInSessionTimeSeconds != null &&
+    session.t + episode.endTimeSeconds >=
+      defense.turnInSessionTimeSeconds - Number.EPSILON);
+  const ownershipAllowed =
+    (!matchingDefense || cornerAuthorityNeeded) &&
+    ownershipAllowsNominalContact(
+      session,
+      entry,
+      program,
+      hazard,
+      racecraftCandidateMayAuthorCornerOwnership(
+        defense
       )
     );
-  }
-
-  let previousDifference =
-    samples[0]!.speed - allowed[0]!;
-  if (previousDifference > Number.EPSILON) return targetTime;
-  for (let index = 1; index < samples.length; index++) {
-    const difference = samples[index]!.speed - allowed[index]!;
-    if (difference <= Number.EPSILON) {
-      previousDifference = difference;
-      continue;
-    }
-    const from = samples[index - 1]!;
-    const to = samples[index]!;
-    const span = difference - previousDifference;
-    const fraction = span <= Number.EPSILON
-      ? 1
-      : clamp(-previousDifference / span, 0, 1);
-    const brakingStart =
-      from.time + (to.time - from.time) * fraction;
-    return Math.max(0, targetTime - brakingStart);
-  }
-  return 0;
-}
-
-function responseCompletionSeconds(
-  session: Session,
-  entry: ActiveEntry,
-  current: CandidateProgram,
-  response: CandidateProgram,
-  hazardTime: number
-): number {
-  const currentStation = current.stations[0]!;
-  let lateralExcursion = 0;
-  for (const station of response.stations) {
-    if (station.time > hazardTime + Number.EPSILON) break;
-    const baseline = programStationAtTime(
-      session.trk,
-      current.stations,
-      station.time
-    );
-    lateralExcursion = Math.max(
-      lateralExcursion,
-      Math.abs(station.lateral - baseline.lateral)
-    );
-  }
-  const atHazard = programStationAtTime(
-    session.trk,
-    response.stations,
-    hazardTime
-  );
-  const baselineAtHazard = programStationAtTime(
-    session.trk,
-    current.stations,
-    hazardTime
-  );
-  lateralExcursion = Math.max(
-    lateralExcursion,
-    Math.abs(atHazard.lateral - baselineAtHazard.lateral)
-  );
-  const currentState = laneStateAt(
-    session,
-    entry,
-    currentStation.progress,
-    current.evaluation.plan
-  );
-  const grip = longitudinalAccelerationHeadroom(
-    currentStation.speed,
-    currentState.curvature,
-    currentState.dynamicMu,
-    evaluatorDynamics(session, entry).downforceScale
-  );
-  const lateral = physicalLateralMoveSeconds(
-    currentStation.speed,
-    lateralExcursion,
-    grip
-  );
-  const braking = brakingCompletionSeconds(
-    session,
-    entry,
-    current,
-    response,
-    hazardTime
-  );
-  return Math.max(lateral, braking);
-}
-
-function contactLossSeconds(contact: SweptContact | null): number {
-  return contact
-    ? measuredContactEpisodeLossSeconds(contact.episodes)
-    : 0;
-}
-
-function resolveHazardResponseOption(
-  option: HazardResponseOption
-): number {
-  if (option.q != null) return option.q;
-  let q = option.qLowerBound;
-  for (const contact of option.unresolvedContacts ?? []) {
-    const bound = measuredContactEpisodeLossBound(contact.episodes);
-    q += contactLossSeconds(contact) - bound.lowerBoundSeconds;
-  }
-  option.q = q;
-  option.unresolvedContacts = null;
-  return q;
-}
-
-function minimumHazardResponseOption(
-  options: readonly HazardResponseOption[],
-  includeEmergency: boolean
-): HazardResponseOption | null {
-  let best: HazardResponseOption | null = null;
-  for (const option of options) {
-    if (!includeEmergency && option.emergency || option.q == null) continue;
-    if (!best ||
-        option.q < best.q! ||
-        (option.q === best.q && option.order < best.order))
-      best = option;
-  }
-  let unresolved: HazardResponseOption | null = null;
-  for (const option of options) {
-    if (!includeEmergency && option.emergency || option.q != null) continue;
-    if (!unresolved ||
-        option.qLowerBound < unresolved.qLowerBound ||
-        (option.qLowerBound === unresolved.qLowerBound &&
-          option.order < unresolved.order))
-      unresolved = option;
-  }
-  if (unresolved && (
-    !best ||
-    unresolved.qLowerBound < best.q! ||
-    (unresolved.qLowerBound === best.q &&
-      unresolved.order < best.order)
-  )) {
-    resolveHazardResponseOption(unresolved);
-    return minimumHazardResponseOption(options, includeEmergency);
-  }
-  return best;
+  return contact.episodes.every(episode => {
+    const absolute = {
+      startTimeSeconds:
+        session.t + episode.startTimeSeconds,
+      endTimeSeconds:
+        session.t + episode.endTimeSeconds
+    };
+    const approachAllowed =
+      defensiveContactEpisodeIsAuthorized(
+        defense,
+        hazard.other.code,
+        absolute
+      );
+    if (approachAllowed) return true;
+    if (!ownershipAllowed) return false;
+    if (!matchingDefense) return true;
+    const deadline =
+      defense.noticeDeadlineSessionTimeSeconds;
+    const turnIn = defense.turnInSessionTimeSeconds;
+    return deadline != null &&
+      turnIn != null &&
+      absolute.startTimeSeconds >=
+        deadline - Number.EPSILON &&
+      absolute.endTimeSeconds >=
+        turnIn - Number.EPSILON;
+  });
 }
 
 function programCarriesUtilizationRisk(program: CandidateProgram): boolean {
@@ -5663,24 +5650,13 @@ function evaluateHazard(
   entry: ActiveEntry,
   program: CandidateProgram,
   hazard: Hazard,
-  hazards: readonly Hazard[],
-  responsePrograms: readonly CandidateProgram[],
-  lateralPerturbation: {
-    stationIndex: number;
-    direction: -1 | 1;
-  } | null = null,
-  boundedStations?: readonly RelativePointStation[] | null,
-  boundedClearance?: {
-    stationIndex: number;
-    clearanceMetres: number;
-  } | null
+  boundedStations?: readonly RelativePointStation[] | null
 ): HazardCost {
   const stations = boundedStations === undefined
     ? boundedRelativeStations(
         session,
         program,
-        hazard,
-        lateralPerturbation
+        hazard
       )
     : boundedStations;
   const contact = (stations
@@ -5689,40 +5665,21 @@ function evaluateHazard(
         program,
         hazard,
         stations,
-        0,
-        lateralPerturbation
+        0
       )
     : null) ??
     offHorizonAttackContact(
       session,
       entry,
       program,
-      hazard,
-      lateralPerturbation
+      hazard
     );
   if (!contact)
     return {
       seconds: 0,
-      billSeconds: 0,
-      recourseSeconds: 0,
-      bindingStationIndex: stations
-        ? (boundedClearance ?? programHazardClearance(
-            session,
-            program,
-            hazard,
-            stations
-          )).stationIndex
-        : -1
+      billSeconds: 0
     };
-  const targetProgress = contact.egoProgress;
-  const currentThroughContact = programExtendedToProgress(
-    session,
-    entry,
-    program,
-    targetProgress
-  );
-  if (!lateralPerturbation &&
-      contact.time >
+  if (contact.time >
         MANEUVER_PREDICTION.horizonSeconds + Number.EPSILON) {
     session.racecraftOffHorizonContests =
       (session.racecraftOffHorizonContests ?? 0) + 1;
@@ -5731,195 +5688,39 @@ function evaluateHazard(
       contact.time
     );
   }
-  const atNextDecision = programStationAtTime(
-    session.trk,
-    currentThroughContact.stations,
-    RACECRAFT_DECISION_INTERVAL_SECONDS
-  );
-  const actuationSeconds = PATH_FOLLOWER_SETTLE_DISTANCE /
-    Math.max(Number.EPSILON, atNextDecision.speed);
-  if (contact.time <
-      RACECRAFT_DECISION_INTERVAL_SECONDS + actuationSeconds) {
-    const physicalLoss = contactLossSeconds(contact);
-    return {
-      seconds: physicalLoss,
-      billSeconds: physicalLoss,
-      recourseSeconds: 0,
-      bindingStationIndex: contact.stationIndex
-    };
-  }
-
-  const currentContinuationRisk =
-    programCarriesUtilizationRisk(program)
-      ? utilizationRisk(
-          session,
-          entry,
-          program,
-          RACECRAFT_DECISION_INTERVAL_SECONDS,
-          contact.time
-        )
-      : 0;
-  const referenceSpeed =
-    session.trk.idealPath.v[
-      indexAtProgress(session.trk, entry, targetProgress)
-    ]! * evaluatorDynamics(session, entry).margin;
-  const continuationBaseline = {
-    targetProgress,
-    referenceSpeed,
-    currentSeconds:
-      contact.time +
-      terminalContinuationSeconds(
-        session,
-        entry,
-        targetProgress,
-        contact.egoSpeed,
-        referenceSpeed,
-        program.speedLaw.brakingEffort
-      )
-  };
-  const evaluateResponse = (
-    response: CandidateProgram,
-    order: number
-  ): HazardResponseOption | null => {
-    if (!response.evaluation.feasible ||
-        response === program) return null;
-    const responseThroughContact = programExtendedToProgress(
-      session,
-      entry,
-      response,
-      targetProgress
-    );
-    const completion = responseCompletionSeconds(
-      session,
-      entry,
-      currentThroughContact,
-      responseThroughContact,
-      contact.time
-    );
-    if (!Number.isFinite(completion)) return null;
-    const slack = responseSlack({
-      timeToHazardSeconds: contact.time,
-      actuationSeconds,
-      completionSeconds: completion,
-      nextDecisionSeconds: RACECRAFT_DECISION_INTERVAL_SECONDS
-    });
-    if (slack.nowSeconds < 0) return null;
-    const delayed = conditionedResponseProgram(
-      session,
-      currentThroughContact,
-      currentThroughContact,
-      responseThroughContact,
-      RACECRAFT_DECISION_INTERVAL_SECONDS + actuationSeconds
-    );
-    let residualLowerBoundSeconds = 0;
-    const unresolvedContacts: SweptContact[] = [];
-    for (const residualHazard of hazards) {
-      const residualPoints = relativePointStations(
-        session,
-        delayed,
-        residualHazard,
-        residualHazard === hazard ? lateralPerturbation : null
-      );
-      const residualBound = pointTrajectoryBound(
-        session,
-        delayed,
-        residualHazard,
-        residualPoints
-      );
-      const residualContact = (
-        residualBound
-          ? firstSweptContact(
-              session,
-              delayed,
-              residualHazard,
-              residualPoints,
-              0,
-              residualHazard === hazard
-                ? lateralPerturbation
-                : null
-            )
-          : null
-      ) ?? offHorizonAttackContact(
-        session,
-        entry,
-        delayed,
-        residualHazard
-      );
-      if (!residualContact) continue;
-      if (damagingContact(residualContact)) return null;
-      const loss = measuredContactEpisodeLossBound(
-        residualContact.episodes
-      );
-      residualLowerBoundSeconds += loss.lowerBoundSeconds;
-      if (!loss.exact) unresolvedContacts.push(residualContact);
-    }
-    const responsePlan = delayed.evaluation.plan;
-    const emergency =
-      responsePlan.mode !== 'ideal' &&
-      responsePlan.mode !== 'pit' &&
-      responsePlan.surfaceAuthorization === 'emergency';
-    const responseContinuationRisk =
-      programCarriesUtilizationRisk(delayed)
-        ? utilizationRisk(
-            session,
-            entry,
-            delayed,
-            RACECRAFT_DECISION_INTERVAL_SECONDS,
-            contact.time
-          )
-        : 0;
-    const qLowerBound = incrementalContinuationTimeSeconds(
+  const hardContact = damagingContact(contact);
+  if (!hardContact &&
+      nominalContactEpisodesAreAuthorized(
         session,
         entry,
         program,
-        delayed,
-        continuationBaseline
-      ) +
-        responseContinuationRisk -
-        currentContinuationRisk +
-        residualLowerBoundSeconds;
+        hazard,
+        contact
+      ))
     return {
-      q: unresolvedContacts.length ? null : qLowerBound,
-      qLowerBound,
-      waitSlack: slack.waitSeconds,
-      emergency,
-      order,
-      unresolvedContacts: unresolvedContacts.length
-        ? unresolvedContacts
-        : null
+      seconds: 0,
+      billSeconds: 0
     };
-  };
-  const options: HazardResponseOption[] = [];
-  for (let order = 0; order < responsePrograms.length; order++) {
-    const option = evaluateResponse(responsePrograms[order]!, order);
-    if (option) options.push(option);
-  }
-  const physicalLossBound = measuredContactEpisodeLossBound(
-    contact.episodes
-  );
-  const bestNormal = minimumHazardResponseOption(options, false);
-  const normalResponseExpired =
-    bestNormal == null || bestNormal.waitSlack <= 0;
-  const bestResponse = minimumHazardResponseOption(
-    options,
-    normalResponseExpired
-  );
-  if (normalResponseExpired && !lateralPerturbation)
-    program.emergencyHazards.set(hazard.key, contact.time);
-  let bestContinuation = bestResponse?.q ?? Infinity;
-  if (physicalLossBound.lowerBoundSeconds < bestContinuation)
-    bestContinuation = physicalLossBound.exact
-      ? physicalLossBound.lowerBoundSeconds
-      : contactLossSeconds(contact);
-  const adaptResponsibility =
-    hazard.adaptResponsibility ??=
-      responsibility(session, entry, hazard);
-  const contest = adaptResponsibility * bestContinuation;
+  const veto = hardContact
+    ? 'predicted-hard-contact'
+    : 'predicted-nominal-contact';
+  const newlyRejected = !program.evaluation.vetoes.includes(veto);
+  if (newlyRejected)
+    program.evaluation.vetoes.push(veto);
+  if (hardContact && newlyRejected &&
+      program.defensiveLegality != null &&
+      (
+        program.defensiveLegality.classification === 'new-move' ||
+        program.defensiveLegality.classification === 'continuation'
+      ))
+    recordRacecraftDefensiveCandidateRejection(
+      session,
+      'hard-safety'
+    );
+  program.evaluation.feasible = false;
   return {
-    seconds: contest,
-    billSeconds: 0,
-    recourseSeconds: contest,
-    bindingStationIndex: contact.stationIndex
+    seconds: Infinity,
+    billSeconds: 0
   };
 }
 
@@ -5967,24 +5768,60 @@ function utilizationRisk(
   return probability * consequence;
 }
 
+function programEffortRiskSeconds(
+  session: Session,
+  entry: ActiveEntry,
+  program: CandidateProgram
+): number {
+  if (!program.effortRiskComputed) {
+    program.evaluation.effortRiskSeconds =
+      programCarriesUtilizationRisk(program)
+        ? utilizationRisk(
+            session,
+            entry,
+            program,
+            0,
+            program.utilizationExposure.at(-1)?.time ??
+              MANEUVER_PREDICTION.horizonSeconds
+          )
+        : 0;
+    program.effortRiskComputed = true;
+  }
+  return program.evaluation.effortRiskSeconds;
+}
+
 function scorePrograms(
   session: Session,
   entry: ActiveEntry,
   programs: CandidateProgram[],
-  hazards: readonly Hazard[],
-  responsePrograms: readonly CandidateProgram[] = programs
+  hazards: readonly Hazard[]
 ): void {
   let scratch = scoreProgramsScratchBySession.get(session);
   if (!scratch) {
-    scratch = { hazards: [], stations: [], clearances: [] };
+    scratch = {
+      hazards: [],
+      stations: [],
+      clearances: [],
+      nearRubSamples: []
+    };
     scoreProgramsScratchBySession.set(session, scratch);
   }
   const boundedHazards = scratch.hazards;
   const boundedStations = scratch.stations;
   const boundedClearances = scratch.clearances;
   for (const program of programs) {
+    if (program.fullyScored || program.branchBounded) continue;
+    program.fullyScored = true;
     const evaluation = program.evaluation;
     if (!evaluation.feasible) continue;
+    // Corollary 9 keeps solitary ideal at J=0. P-BE makes utilization an
+    // authored property of side/capability and emergency members; it prices
+    // their measured mistake exposure without becoming a proximity term.
+    const surfaceRisk = programEffortRiskSeconds(
+      session,
+      entry,
+      program
+    );
     boundedHazards.length = 0;
     boundedStations.length = 0;
     boundedClearances.length = 0;
@@ -6013,43 +5850,31 @@ function scorePrograms(
         boundedHazards.push(hazard);
         boundedStations.push(stations);
         boundedClearances.push(clearance);
-      } else {
-        program.perturbations.set(hazard.key, {
-          base: 0,
-          billSeconds: 0,
-          recourseSeconds: 0,
-          bindingStationIndex: -1
-        });
       }
     }
     if (violatesOneIntervalViability(
       session,
-      entry,
       program,
-      hazards,
-      programs
+      hazards
     )) {
-      if (!evaluation.vetoes.includes('predicted-hard-contact'))
+      const newlyRejected =
+        !evaluation.vetoes.includes('predicted-hard-contact');
+      if (newlyRejected)
         evaluation.vetoes.push('predicted-hard-contact');
+      if (newlyRejected &&
+          program.defensiveLegality != null &&
+          (
+            program.defensiveLegality.classification === 'new-move' ||
+            program.defensiveLegality.classification === 'continuation'
+          ))
+        recordRacecraftDefensiveCandidateRejection(
+          session,
+          'hard-safety'
+        );
       evaluation.feasible = false;
       continue;
     }
-    // Corollary 9 keeps solitary ideal at J=0. P-BE makes utilization an
-    // authored property of side/capability and emergency members; it prices
-    // their measured mistake exposure without becoming a proximity term.
-    const plan = evaluation.plan;
-    const surfaceRisk = programCarriesUtilizationRisk(program)
-      ? utilizationRisk(
-          session,
-          entry,
-          program,
-          0,
-          program.utilizationExposure.at(-1)?.time ??
-            MANEUVER_PREDICTION.horizonSeconds
-        )
-      : 0;
-    evaluation.effortRiskSeconds = surfaceRisk;
-    let hazardCost = surfaceRisk;
+    let hazardCost = 0;
     for (let boundedIndex = 0;
       boundedIndex < boundedHazards.length;
       boundedIndex++) {
@@ -6061,79 +5886,89 @@ function scorePrograms(
         entry,
         program,
         hazard,
-        hazards,
-        responsePrograms,
-        null,
-        stations,
-        clearance
+        stations
       );
+      if (stations)
+        evaluation.proximitySeconds += nearRubHazardLossSeconds(
+          session,
+          program,
+          hazard,
+          scratch.nearRubSamples
+        );
       if (cost.seconds !== 0)
         evaluation.hazardCount++;
       evaluation.billSeconds += cost.billSeconds;
-      evaluation.recourseSeconds += cost.recourseSeconds;
       hazardCost += cost.seconds;
       if (!evaluation.feasible) break;
-      program.perturbations.set(hazard.key, {
-        base: cost.seconds,
-        billSeconds: cost.billSeconds,
-        recourseSeconds: cost.recourseSeconds,
-        bindingStationIndex: cost.bindingStationIndex
-      });
     }
     if (!evaluation.feasible) {
       evaluation.cost = Infinity;
       continue;
     }
-    evaluation.cost = evaluation.ownTimeSeconds + hazardCost;
+    evaluation.cost =
+      evaluation.ownTimeSeconds + surfaceRisk + hazardCost;
   }
 }
 
-function applyBattleEconomics(
-  programs: readonly CandidateProgram[],
+function applyProgramBattleEconomics(
+  program: CandidateProgram,
   contexts: readonly BattleEconomicsContext[]
 ): void {
-  for (const program of programs) {
-    const evaluation = program.evaluation;
-    if (!evaluation.feasible || !Number.isFinite(evaluation.cost))
-      continue;
-    let activeContextCount = 0;
-    let continuingBattle = false;
-    let positionValue = 0;
-    for (const context of contexts) {
-      if (battleProgram(program, context)) {
-        activeContextCount++;
-        if (context.state.activeBattleFamilyNumericId ===
-            evaluation.familyNumericId)
-          continuingBattle = true;
-      } else {
-        positionValue += context.positionValueSeconds;
-      }
+  const evaluation = program.evaluation;
+  if (!evaluation.feasible || !Number.isFinite(evaluation.cost)) return;
+  let activeContextCount = 0;
+  let continuingBattle = false;
+  let positionValue = 0;
+  for (const context of contexts) {
+    if (battleProgram(program, context)) {
+      activeContextCount++;
+      if (context.state.activeBattleFamilyNumericId ===
+          evaluation.familyNumericId)
+        continuingBattle = true;
+    } else {
+      positionValue += context.positionValueSeconds;
     }
-    evaluation.positionValueSeconds = positionValue;
-    evaluation.attemptLossSeconds =
-      activeContextCount > 0 && !continuingBattle
-        ? measuredAttackTransitionLossSeconds()
-        : 0;
-    evaluation.battleSpendSeconds = activeContextCount > 0
-      ? battleSpendSeconds({
-          measuredAttemptLossSeconds: evaluation.attemptLossSeconds,
-          contestSeconds: evaluation.recourseSeconds,
-          measuredProximitySeconds: evaluation.proximitySeconds
-        })
-      : 0;
-    evaluation.cost +=
-      evaluation.positionValueSeconds +
-      evaluation.attemptLossSeconds +
-      evaluation.proximitySeconds;
   }
+  evaluation.positionValueSeconds = positionValue;
+  evaluation.attemptLossSeconds =
+    activeContextCount > 0 && !continuingBattle
+      ? measuredAttackTransitionLossSeconds()
+      : 0;
+  evaluation.battleSpendSeconds = activeContextCount > 0
+    ? battleSpendSeconds({
+        measuredAttemptLossSeconds: evaluation.attemptLossSeconds,
+        measuredProximitySeconds: evaluation.proximitySeconds
+      })
+    : 0;
+  evaluation.cost = directionalCandidateObjectiveSeconds({
+    physicalSeconds: evaluation.cost,
+    positionValueSeconds: evaluation.positionValueSeconds,
+    attemptLossSeconds: evaluation.attemptLossSeconds,
+    nearRubLossSeconds: evaluation.proximitySeconds
+  });
+}
+
+function candidateObjectiveLowerBound(
+  session: Session,
+  entry: ActiveEntry,
+  program: CandidateProgram,
+  contexts: readonly BattleEconomicsContext[]
+): number {
+  const evaluation = program.evaluation;
+  evaluation.cost = evaluation.ownTimeSeconds +
+    programEffortRiskSeconds(session, entry, program);
+  applyProgramBattleEconomics(program, contexts);
+  return evaluation.cost;
 }
 
 function incumbentProgram(
   entry: Entry,
   programs: readonly CandidateProgram[]
 ): CandidateProgram | null {
-  const selectedFamilyNumericId =
-    entry.racecraftDecision?.certificate?.selectedFamilyNumericId;
+  const priorDecision = entry.racecraftDecision;
+  const selectedFamilyNumericId = priorDecision?.candidates.find(candidate =>
+    candidate.planNumericId === priorDecision.selectedPlanNumericId)
+    ?.familyNumericId;
   return programs.find(program =>
     selectedFamilyNumericId != null &&
     program.evaluation.familyNumericId === selectedFamilyNumericId) ??
@@ -6142,62 +5977,14 @@ function incumbentProgram(
 }
 
 function tieBand(
-  session: Session,
-  entry: ActiveEntry,
   candidate: CandidateProgram,
-  incumbent: CandidateProgram,
-  hazards: readonly Hazard[],
-  responsePrograms: readonly CandidateProgram[]
+  incumbent: CandidateProgram
 ): number {
-  const perturbations: Array<{
-    incumbentSeconds: number;
-    candidateSeconds: number;
-  }> = [];
   const base = {
     incumbentSeconds: incumbent.evaluation.cost,
     candidateSeconds: candidate.evaluation.cost
   };
-  for (const hazard of hazards) {
-    const candidateShift = candidate.perturbations.get(hazard.key);
-    const incumbentShift = incumbent.perturbations.get(hazard.key);
-    if (!candidateShift || !incumbentShift) continue;
-    const bindingStations = new Set([
-      candidateShift.bindingStationIndex,
-      incumbentShift.bindingStationIndex
-    ]);
-    bindingStations.delete(-1);
-    for (const stationIndex of bindingStations) {
-      for (const direction of [-1, 1] as const) {
-        evaluatorWork(session).tieBandHazardEvaluations += 2;
-        const perturbation = { stationIndex, direction };
-        const candidateSeconds = evaluateHazard(
-          session,
-          entry,
-          candidate,
-          hazard,
-          hazards,
-          responsePrograms,
-          perturbation
-        ).seconds;
-        const incumbentSeconds = evaluateHazard(
-          session,
-          entry,
-          incumbent,
-          hazard,
-          hazards,
-          responsePrograms,
-          perturbation
-        ).seconds;
-        perturbations.push({
-          candidateSeconds: candidate.evaluation.cost -
-            candidateShift.base + candidateSeconds,
-          incumbentSeconds: incumbent.evaluation.cost -
-            incumbentShift.base + incumbentSeconds
-        });
-      }
-    }
-  }
-  return pairwiseDifferenceTieBand(base, perturbations);
+  return pairwiseDifferenceTieBand(base, []);
 }
 
 function appendDecisionLog(
@@ -6234,7 +6021,6 @@ function appendDecisionLog(
       speedClass: candidate.speedClass,
       ownTimeSeconds: candidate.ownTimeSeconds,
       billSeconds: candidate.billSeconds,
-      recourseSeconds: candidate.recourseSeconds,
       proximitySeconds: candidate.proximitySeconds,
       positionValueSeconds: candidate.positionValueSeconds,
       attemptLossSeconds: candidate.attemptLossSeconds,
@@ -6260,70 +6046,59 @@ function appendDecisionLog(
   }
 }
 
+function accumulateSelectedJ(
+  session: Session,
+  entry: Entry,
+  selected: RacecraftCandidateEvaluation | null
+): void {
+  if (session.racecraftDecisionLogging ||
+      session.t - (entry._racecraftLoggedAt ?? -Infinity) <
+        RACECRAFT_DECISION_INTERVAL_SECONDS) return;
+  entry._racecraftLoggedAt = session.t;
+  if (!selected || ![
+    selected.ownTimeSeconds,
+    selected.billSeconds,
+    selected.proximitySeconds,
+    selected.positionValueSeconds,
+    selected.attemptLossSeconds,
+    selected.battleSpendSeconds,
+    selected.effortRiskSeconds,
+    selected.tieBandSeconds,
+    selected.cost
+  ].every(Number.isFinite)) return;
+  const value = session.racecraftSelectedJAccumulator ??
+    (session.racecraftSelectedJAccumulator = {
+      samples: 0,
+      ownTimeSeconds: 0,
+      billSeconds: 0,
+      proximitySeconds: 0,
+      positionValueSeconds: 0,
+      attemptLossSeconds: 0,
+      battleSpendSeconds: 0,
+      effortRiskSeconds: 0,
+      tieBandSeconds: 0,
+      totalSeconds: 0,
+      hazardCount: 0
+    });
+  value.samples++;
+  value.ownTimeSeconds += selected.ownTimeSeconds;
+  value.billSeconds += selected.billSeconds;
+  value.proximitySeconds += selected.proximitySeconds;
+  value.positionValueSeconds += selected.positionValueSeconds;
+  value.attemptLossSeconds += selected.attemptLossSeconds;
+  value.battleSpendSeconds += selected.battleSpendSeconds;
+  value.effortRiskSeconds += selected.effortRiskSeconds;
+  value.tieBandSeconds += selected.tieBandSeconds;
+  value.totalSeconds += selected.cost;
+  value.hazardCount += selected.hazardCount;
+}
+
 export function orderedRacecraftDecisionLog(
   session: Session
 ): readonly RacecraftDecisionLogEntry[] {
   const log = session.racecraftDecisionLog ?? [];
   const cursor = session.racecraftDecisionLogCursor ?? 0;
   return cursor === 0 ? log : [...log.slice(cursor), ...log.slice(0, cursor)];
-}
-
-/**
- * Test/diagnostic view of the deterministic next-observation response set.
- * It performs no recursive objective evaluation and materializes no path.
- */
-export function racecraftDeferredResponses(
-  session: Session,
-  entry: Entry,
-  entries: readonly Entry[],
-  candidateKind: RacecraftCandidateKind,
-  rivalCode: string
-): RacecraftDeferredResponseSummary[] {
-  if (!entry.car || entry.state !== 'run') return [];
-  const selection = selectRacecraftProgram(session, entry, entries);
-  if (!selection ||
-      !selection.hazards.some(hazard =>
-        hazard.other.code === rivalCode) ||
-      !selection.programs.some(program =>
-        program.evaluation.kind === candidateKind))
-    return [];
-  return selection.programs.map(response => {
-    const plan = response.evaluation.plan;
-    return {
-      kind: response.evaluation.kind,
-      planKey: plan.key,
-      lineBlend: plan.mode !== 'ideal' && plan.mode !== 'pit'
-        ? plan.lineBlend ?? null
-        : null,
-      targetLateral: response.evaluation.targetLateral,
-      surfaceAuthorization:
-        plan.mode !== 'ideal' && plan.mode !== 'pit'
-          ? plan.surfaceAuthorization ?? 'normal'
-          : 'normal',
-      feasible: response.evaluation.feasible
-    };
-  });
-}
-
-/** Diagnostic view of the single constraint-derived emergency response. */
-export function racecraftJointEmergencyResponse(
-  session: Session,
-  entry: Entry,
-  entries: readonly Entry[]
-): RacecraftEmergencyResponseSummary | null {
-  if (!entry.car || entry.state !== 'run') return null;
-  const active = entry as ActiveEntry;
-  const claims = evaluationClaimsAt(session, entries);
-  const hazards = hazardsFor(session, active, entries, claims);
-  const seed = jointEmergencyEscapeSeed(session, active, hazards);
-  if (!seed ||
-      seed.plan.mode === 'ideal' ||
-      seed.plan.mode === 'pit')
-    return null;
-  return {
-    direction: seed.kind === 'corner-inside' ? -1 : 1,
-    targetLateral: seed.plan.anchors[1]?.offset ?? entry.latNow
-  };
 }
 
 interface RacecraftProgramSelection {
@@ -6337,125 +6112,11 @@ interface RacecraftProgramSelection {
   economics: BattleEconomicsContext[];
 }
 
-function repriceHazardsWithEmergencyResponse(
-  session: Session,
-  entry: ActiveEntry,
-  programs: readonly CandidateProgram[],
-  hazards: readonly Hazard[],
-  normalProgramCount: number
-): void {
-  for (let programIndex = 0;
-    programIndex < normalProgramCount;
-    programIndex++) {
-    const program = programs[programIndex]!;
-    if (!program.evaluation.feasible ||
-        !program.emergencyHazards.size) continue;
-    const evaluation = program.evaluation;
-    for (const hazard of hazards) {
-      if (!program.emergencyHazards.has(hazard.key)) continue;
-      const stations = boundProgramHazard(session, program, hazard);
-      const clearance = stations
-        ? programHazardClearance(
-            session,
-            program,
-            hazard,
-            stations
-          )
-        : null;
-      const previous = program.perturbations.get(hazard.key);
-      const cost = evaluateHazard(
-        session,
-        entry,
-        program,
-        hazard,
-        hazards,
-        programs,
-        null,
-        stations,
-        clearance
-      );
-      const previousSeconds = previous?.base ?? 0;
-      if (previousSeconds === 0 && cost.seconds !== 0)
-        evaluation.hazardCount++;
-      else if (previousSeconds !== 0 && cost.seconds === 0)
-        evaluation.hazardCount--;
-      evaluation.billSeconds += cost.billSeconds -
-        (previous?.billSeconds ?? 0);
-      evaluation.recourseSeconds += cost.recourseSeconds -
-        (previous?.recourseSeconds ?? 0);
-      evaluation.cost += cost.seconds - previousSeconds;
-      program.perturbations.set(hazard.key, {
-        base: cost.seconds,
-        billSeconds: cost.billSeconds,
-        recourseSeconds: cost.recourseSeconds,
-        bindingStationIndex: cost.bindingStationIndex
-      });
-    }
-    program.emergencyHazards.clear();
-  }
-}
-
-function appendSlackGatedEmergencyProgram(
-  session: Session,
-  entry: ActiveEntry,
-  entries: readonly Entry[],
-  programs: CandidateProgram[],
-  hazards: readonly Hazard[],
-  evaluationClaims: EvaluationClaimMap,
-  previousKind: RacecraftCandidateKind | null
-): void {
-  const expiringKeys = new Set<string>();
-  for (const program of programs) {
-    for (const key of program.emergencyHazards.keys())
-      expiringKeys.add(key);
-  }
-  if (!expiringKeys.size) return;
-  if (programs.length >= MAX_RACECRAFT_CANDIDATES)
-    throw new Error('Slack-gated emergency has no maneuver slot');
-  const expiringHazards: Hazard[] = [];
-  for (const hazard of hazards)
-    if (expiringKeys.has(hazard.key))
-      expiringHazards.push(hazard);
-  const seed = jointEmergencyEscapeSeed(
-    session,
-    entry,
-    expiringHazards
-  );
-  if (!seed) {
-    for (const program of programs) program.emergencyHazards.clear();
-    return;
-  }
-  const normalProgramCount = programs.length;
-  evaluatorWork(session).candidateSeedsBuilt++;
-  const emergency = evaluateSeed(
-    session,
-    entry,
-    entries,
-    seed,
-    previousKind,
-    evaluationClaims
-  );
-  programs.push(emergency);
-  repriceHazardsWithEmergencyResponse(
-    session,
-    entry,
-    programs,
-    hazards,
-    normalProgramCount
-  );
-  scorePrograms(
-    session,
-    entry,
-    [emergency],
-    hazards,
-    programs
-  );
-}
-
 function selectRacecraftProgram(
   session: Session,
   entry: Entry,
-  entries: readonly Entry[]
+  entries: readonly Entry[],
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[]
 ): RacecraftProgramSelection | null {
   if (!entry.car || entry.state !== 'run' || entry.pathPlan?.mode === 'pit')
     return null;
@@ -6491,6 +6152,9 @@ function selectRacecraftProgram(
     evaluationClaims,
     false
   );
+  const workspace = prepareCandidateEvaluationWorkspace(active);
+  bindCandidateTowWorkspace(evaluationClaims, workspace);
+  retainedCandidateSpatialPlanByEntry.set(active, seeds[0]!.plan);
   const programs = new Array<CandidateProgram>(seeds.length);
   for (let index = 0; index < seeds.length; index++)
     programs[index] = evaluateSeed(
@@ -6499,7 +6163,9 @@ function selectRacecraftProgram(
       entries,
       seeds[index]!,
       previousKind,
-      evaluationClaims
+      evaluationClaims,
+      actionableOwnershipViews,
+      workspace
     );
   const leader = activeLeader(session, active, entries);
   let hold: CandidateProgram | undefined;
@@ -6507,16 +6173,23 @@ function selectRacecraftProgram(
     if (program.evaluation.kind === 'hold') {
       hold = program;
       break;
-    }
+  }
   if (leader && hold && programs.length < MAX_RACECRAFT_CANDIDATES) {
-    const brakeSeed = brakeBehindSeed(session, active, leader.entry);
+    const brakeSeed = brakeBehindSeed(
+      session,
+      active,
+      leader.entry,
+      hold.evaluation.plan
+    );
     const brakeSpeedLaw = composeCandidateSpeedLaw(
       session,
       active,
       brakeSeed.plan,
       brakeSeed.slowPointOwnerCode,
       entries,
-      evaluationClaims
+      evaluationClaims,
+      undefined,
+      workspace
     );
     if (speedLawAddsConstraint(hold.speedLaw, brakeSpeedLaw)) {
       evaluatorWork(session).candidateSeedsBuilt++;
@@ -6527,20 +6200,19 @@ function selectRacecraftProgram(
         brakeSeed,
         previousKind,
         evaluationClaims,
+        actionableOwnershipViews,
+        workspace,
         true,
         brakeSpeedLaw
       ));
     }
   }
-  scorePrograms(session, active, programs, hazards);
-  appendSlackGatedEmergencyProgram(
+  const attacker = applyDefensiveLegality(
     session,
     active,
     entries,
     programs,
-    hazards,
-    evaluationClaims,
-    previousKind
+    actionableOwnershipViews
   );
   const fullSeedEvaluations =
     evaluatorWork(session).seedEvaluations - seedEvaluationsBefore;
@@ -6549,7 +6221,6 @@ function selectRacecraftProgram(
       `Racecraft full evaluation budget exceeded: ` +
       `${fullSeedEvaluations}/${MAX_RACECRAFT_CANDIDATES}`
     );
-  const economics: BattleEconomicsContext[] = [];
   let leaderHazard: Hazard | null = null;
   if (leader)
     for (const hazard of hazards)
@@ -6557,6 +6228,34 @@ function selectRacecraftProgram(
         leaderHazard = hazard;
         break;
       }
+  let attackerHazard: Hazard | null = null;
+  if (attacker)
+    for (const hazard of hazards)
+      if (hazard.other === attacker.entry) {
+        attackerHazard = hazard;
+        break;
+      }
+  const incumbent = incumbentProgram(entry, programs);
+  const priority: CandidateProgram[] = [];
+  const appendPriority = (program: CandidateProgram | null): void => {
+    if (program && !priority.includes(program)) priority.push(program);
+  };
+  appendPriority(incumbent);
+  for (const program of programs) {
+    if (leader && normalAttackProgram(program, leader.entry))
+      appendPriority(program);
+    if (attacker && normalDefenseProgram(
+      session,
+      program,
+      active,
+      attacker.claim
+    ))
+      appendPriority(program);
+  }
+  // Context membership depends on post-contact feasibility, so its members
+  // and the incumbent establish exact upper bounds before any pruning.
+  scorePrograms(session, active, priority, hazards);
+  const economics: BattleEconomicsContext[] = [];
   if (leader && leaderHazard)
     economics.push(updateBattleEconomicsContext(
       session,
@@ -6566,14 +6265,6 @@ function selectRacecraftProgram(
       leaderHazard,
       'attack'
     ));
-  const attacker = activeDefensiveAttacker(session, active, entries);
-  let attackerHazard: Hazard | null = null;
-  if (attacker)
-    for (const hazard of hazards)
-      if (hazard.other === attacker.entry) {
-        attackerHazard = hazard;
-        break;
-      }
   if (attacker && attackerHazard)
     economics.push(updateBattleEconomicsContext(
       session,
@@ -6581,11 +6272,42 @@ function selectRacecraftProgram(
       attacker.entry,
       programs,
       attackerHazard,
-      'defense'
+      'defense',
+      attacker.claim
     ));
   reconcileBattleOpportunityObservations(session, active, economics);
-  applyBattleEconomics(programs, economics);
-  const incumbent = incumbentProgram(entry, programs);
+  for (const program of priority)
+    applyProgramBattleEconomics(program, economics);
+  let upperBound = Infinity;
+  for (const program of priority)
+    if (program.evaluation.feasible)
+      upperBound = Math.min(upperBound, program.evaluation.cost);
+  const remaining = programs
+    .map((program, index) => ({ program, index }))
+    .filter(({ program }) =>
+      program.evaluation.feasible && !program.fullyScored)
+    .map(value => ({
+      ...value,
+      lowerBound: candidateObjectiveLowerBound(
+        session,
+        active,
+        value.program,
+        economics
+      )
+    }))
+    .sort((left, right) =>
+      left.lowerBound - right.lowerBound || left.index - right.index);
+  for (const { program, lowerBound } of remaining) {
+    if (lowerBound > upperBound) {
+      program.branchBounded = true;
+      evaluatorWork(session).branchBoundPrunes++;
+      continue;
+    }
+    scorePrograms(session, active, [program], hazards);
+    applyProgramBattleEconomics(program, economics);
+    if (program.evaluation.feasible)
+      upperBound = Math.min(upperBound, program.evaluation.cost);
+  }
   let best: CandidateProgram | null = null;
   for (const program of programs)
     if (program.evaluation.feasible &&
@@ -6593,17 +6315,10 @@ function selectRacecraftProgram(
           program.evaluation.cost < best.evaluation.cost))
       best = program;
   if (best && incumbent?.evaluation.feasible && best !== incumbent) {
-    const beta = tieBand(
-      session,
-      active,
-      best,
-      incumbent,
-      hazards,
-      programs
-    );
-    best.evaluation.tieBandSeconds = beta;
-    if (!(best.evaluation.cost + beta < incumbent.evaluation.cost)) {
-      incumbent.evaluation.tieBandSeconds = beta;
+    const differenceBand = tieBand(best, incumbent);
+    best.evaluation.tieBandSeconds = differenceBand;
+    if (!(best.evaluation.cost + differenceBand < incumbent.evaluation.cost)) {
+      incumbent.evaluation.tieBandSeconds = differenceBand;
       best = incumbent;
     }
   }
@@ -6616,230 +6331,6 @@ function selectRacecraftProgram(
     previousKind,
     zeroHazardIdeal: false,
     economics
-  };
-}
-
-function selectedFamilyOffset(
-  track: Track,
-  plan: PathPlan,
-  index: number,
-  progress: number
-): number {
-  return plan.mode === 'ideal' || plan.mode === 'pit'
-    ? track.idealPath!.off[cyclicIndex(track, index)]!
-    : sampleCompactPathPlanOffset(track, plan, index, progress);
-}
-
-function selectedAnchorProgress(
-  track: Track,
-  entry: ActiveEntry,
-  anchor: DynamicPlan['anchors'][number]
-): number {
-  if (anchor.s != null) return anchor.s;
-  const distance = (
-    cyclicIndex(track, anchor.index) -
-    cyclicIndex(track, entry.car.progIdx) +
-    track.n
-  ) % track.n * track.step;
-  return entry.prog + distance;
-}
-
-/**
- * Preserve one selected family while rebuilding only its physical acquisition
- * from the latest measured state. This is geometry construction, not a
- * candidate search.
- */
-function reanchorSelectedFamily(
-  session: Session,
-  entry: ActiveEntry,
-  source: PathPlan
-): DynamicPlan | null {
-  if (source.mode === 'pit') return null;
-  const track = session.trk;
-  const family = source.mode === 'ideal' ? null : source;
-  const start = cyclicIndex(track, entry.car.progIdx);
-  const speed = Math.max(0, entry.spd || entry.car.spd);
-  const horizonDistance = Math.max(8, speed) *
-    MANEUVER_PREDICTION.horizonSeconds;
-  const probeProgress = entry.prog + Math.max(track.step, PHYS.carLen);
-  const probeIndex = indexAtProgress(track, entry, probeProgress);
-  const moveSeconds = physicalLaneMoveSeconds(
-    session,
-    entry,
-    selectedFamilyOffset(track, source, probeIndex, probeProgress)
-  );
-  const acquisitionDistance = Math.min(
-    horizonDistance,
-    Math.max(
-      track.step,
-      PHYS.carLen,
-      speed * (Number.isFinite(moveSeconds)
-        ? moveSeconds
-        : MANEUVER_PREDICTION.horizonSeconds)
-    )
-  );
-  const acquisitionProgress = entry.prog + acquisitionDistance;
-  const acquisitionIndex = indexAtProgress(
-    track,
-    entry,
-    acquisitionProgress
-  );
-  const anchors: DynamicPlan['anchors'] = [
-    currentAuthoredAnchor(session, entry),
-    {
-      index: acquisitionIndex,
-      offset: selectedFamilyOffset(
-        track,
-        source,
-        acquisitionIndex,
-        acquisitionProgress
-      ),
-      s: acquisitionProgress
-    }
-  ];
-  for (const anchor of family?.anchors.slice(1) ?? []) {
-    const progress = selectedAnchorProgress(track, entry, anchor);
-    if (progress <= acquisitionProgress + Number.EPSILON ||
-        progress - entry.prog > track.len / 2) continue;
-    const index = cyclicIndex(track, anchor.index);
-    if (index === anchors.at(-1)!.index) continue;
-    anchors.push({ ...anchor, index, s: progress });
-  }
-  const horizonProgress = entry.prog + horizonDistance;
-  const horizonIndex = indexAtProgress(track, entry, horizonProgress);
-  if (anchors.at(-1)!.s! < horizonProgress - Number.EPSILON &&
-      anchors.at(-1)!.index !== horizonIndex)
-    anchors.push({
-      index: horizonIndex,
-      offset: selectedFamilyOffset(
-        track,
-        source,
-        horizonIndex,
-        horizonProgress
-      ),
-      s: horizonProgress
-    });
-
-  const plan: DynamicPlan = family
-    ? {
-        ...family,
-        key: `${family.key}:rederived:${entry.prog.toPrecision(12)}`,
-        anchors,
-        pinnedFirst: true
-      }
-    : {
-        mode: 'tuck',
-        key: `ideal:rederived:${entry.code}:${entry.prog.toPrecision(12)}`,
-        anchors,
-        pinnedFirst: true,
-        topology: 'hold',
-        terminal: 'ideal-rejoin',
-        surfaceAuthorization: 'normal'
-      };
-  if (plan.cornerId) {
-    const corner = track.corners.find(value => value.id === plan.cornerId);
-    const exitDistance = corner
-      ? distanceAhead(track, start, corner.exitI)
-      : Infinity;
-    if (!corner || exitDistance > track.len / 2) {
-      delete plan.cornerId;
-      delete plan.complexId;
-      delete plan.lineKind;
-      delete plan.lineBlend;
-    }
-  }
-  return plan;
-}
-
-/**
- * Re-evaluate the production candidate family without installing a path or
- * touching decision diagnostics. Claim publication consumes this when a
- * driven car has broken its prior publication.
- */
-export function rederiveRacecraftOptimalProgram(
-  session: Session,
-  entry: Entry,
-  entries: readonly Entry[]
-): RacecraftOptimalProgram | null {
-  const selection = selectRacecraftProgram(session, entry, entries);
-  if (!selection) return null;
-  if (selection.zeroHazardIdeal) {
-    const program = evaluateSeed(
-      session,
-      selection.active,
-      entries,
-      {
-        kind: 'ideal',
-        plan: acquisitionPlan(session, selection.active, 'ideal'),
-        slowPointOwnerCode: null
-      },
-      selection.previousKind,
-      selection.evaluationClaims
-    );
-    return {
-      kind: 'ideal',
-      plan: program.evaluation.plan,
-      slowPointOwnerCode: null,
-      candidateCount: 0,
-      stations: program.stations.map(station => ({ ...station }))
-    };
-  }
-  // A car already outside a hard constraint can have an empty feasible set.
-  // Its ideal-family member is still the non-adversarial recovery prediction;
-  // critically, it never falls back to the broken incumbent publication.
-  const best = selection.best ??
-    selection.programs.find(program =>
-      program.evaluation.kind === 'ideal') ??
-    null;
-  if (!best) return null;
-  return {
-    kind: best.evaluation.kind,
-    plan: best.evaluation.plan,
-    slowPointOwnerCode: best.evaluation.slowPointOwnerCode,
-    candidateCount: selection.programs.length,
-    stations: best.stations.map(station => ({ ...station }))
-  };
-}
-
-/**
- * Rebuild one previously selected family from measurement and evaluate only
- * that seed. No alternative family, objective, tie-band, or path installation
- * participates between deliberation epochs.
- */
-export function rebuildRacecraftSelectedProgram(
-  session: Session,
-  entry: Entry,
-  entries: readonly Entry[],
-  selected: {
-    kind: RacecraftCandidateKind;
-    plan: PathPlan;
-    slowPointOwnerCode: string | null;
-  }
-): RacecraftOptimalProgram | null {
-  if (!entry.car || entry.state !== 'run' || entry.pathPlan?.mode === 'pit')
-    return null;
-  const active = entry as ActiveEntry;
-  const plan = reanchorSelectedFamily(session, active, selected.plan);
-  if (!plan) return null;
-  const evaluationClaims = evaluationClaimsAt(session, entries);
-  const program = evaluateSeed(
-    session,
-    active,
-    entries,
-    {
-      kind: selected.kind,
-      plan,
-      slowPointOwnerCode: selected.slowPointOwnerCode
-    },
-    selected.kind,
-    evaluationClaims
-  );
-  return {
-    kind: selected.kind,
-    plan,
-    slowPointOwnerCode: selected.slowPointOwnerCode,
-    candidateCount: 1,
-    stations: program.stations.map(station => ({ ...station }))
   };
 }
 
@@ -6863,14 +6354,6 @@ export function makeRacecraftSettledSolitudeDecision(
     chosenUtilization,
     selectedLongitudinalProgram: null,
     economics: [],
-    certificate: makeDecisionCertificate(
-      session,
-      entry,
-      [],
-      null,
-      null,
-      true
-    ),
     candidates: []
   };
 }
@@ -6898,8 +6381,12 @@ export function racecraftCurrentLaneCurvature(
   const index = Math.max(0, entry.car.progIdx) % session.trk.n;
   return entry.pathPlan?.mode === 'pit' && entry.path
     ? entry.path.k[index]!
-    : entry.laneBuffer?.startIndex === index && entry.laneBuffer.count > 0
-      ? entry.laneBuffer.k[0]!
+    : entry.racecraftLateralProgram
+      ? compactLateralGeometryAtProgress(
+          session.trk,
+          entry.racecraftLateralProgram,
+          entry.prog
+        ).curvature
       : session.trk.idealPath.k[index]!;
 }
 
@@ -6936,16 +6423,22 @@ export function racecraftCurrentGripUtilization(
   );
 }
 
-/** One bounded argmin in seconds, evaluated against the immutable snapshot. */
-export function evaluateRacecraftDecision(
+/** One bounded argmin in seconds against current immutable publications. */
+function evaluateRacecraftDecisionOnce(
   session: Session,
   entry: Entry,
-  entries: readonly Entry[]
+  entries: readonly Entry[],
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[]
 ): RacecraftDecision | null {
   if (!entry.car || entry.state !== 'run' || entry.pathPlan?.mode === 'pit' ||
       entry.recT > 0 || entry.car.offCourse) return null;
   evaluatorWork(session).decisionCalls++;
-  const selection = selectRacecraftProgram(session, entry, entries);
+  const selection = selectRacecraftProgram(
+    session,
+    entry,
+    entries,
+    actionableOwnershipViews
+  );
   if (!selection) return null;
   if (selection.zeroHazardIdeal) {
     commitBattleEconomicsSelection(selection.active, null, []);
@@ -6962,29 +6455,107 @@ export function evaluateRacecraftDecision(
     previousKind,
     economics
   } = selection;
-  const candidates = programs.map(program => program.evaluation);
-  const rejected = candidates.filter(candidate => !candidate.feasible);
-  session.racecraftRejectedCandidates =
-    (session.racecraftRejectedCandidates ?? 0) + rejected.length;
+  const previousDecision = entry.racecraftDecision;
+  const previousSelected = previousDecision?.candidates.find(candidate =>
+    candidate.planNumericId === previousDecision.selectedPlanNumericId);
+  const previousPublication = session.racecraftClaims?.get(entry.code);
+  const selectedPlan = best?.evaluation.plan;
+  const selectedTarget = selectedPlan &&
+      selectedPlan.mode !== 'ideal' &&
+      selectedPlan.mode !== 'pit'
+    ? selectedPlan.leaderCode ??
+      best?.evaluation.slowPointOwnerCode ??
+      null
+    : null;
+  const previousTarget = previousSelected &&
+      previousSelected.plan.mode !== 'ideal' &&
+      previousSelected.plan.mode !== 'pit'
+    ? previousSelected.plan.leaderCode ??
+      previousSelected.slowPointOwnerCode
+    : null;
+  const selectedSideKind =
+    best?.evaluation.kind === 'corner-inside' ||
+    best?.evaluation.kind === 'corner-outside';
+  const previousSideKind =
+    previousSelected?.kind === 'corner-inside' ||
+    previousSelected?.kind === 'corner-outside';
+  const selectedCornerId = selectedPlan &&
+      selectedPlan.mode !== 'ideal' &&
+      selectedPlan.mode !== 'pit'
+    ? selectedPlan.cornerId ?? null
+    : null;
+  const previousCornerId = previousSelected &&
+      previousSelected.plan.mode !== 'ideal' &&
+      previousSelected.plan.mode !== 'pit'
+    ? previousSelected.plan.cornerId ?? null
+    : null;
+  if (best && previousSelected && selectedSideKind && previousSideKind &&
+      best.evaluation.kind !== previousSelected.kind &&
+      best.evaluation.familyNumericId !==
+        previousSelected.familyNumericId &&
+      selectedTarget != null &&
+      selectedTarget === previousTarget &&
+      selectedCornerId === previousCornerId &&
+      previousPublication?.mode === 'staged-attack' &&
+      previousPublication.targetCode === selectedTarget) {
+    session.racecraftSwitchbackFamilyChanges =
+      (session.racecraftSwitchbackFamilyChanges ?? 0) + 1;
+    session.switchbackN = (session.switchbackN ?? 0) + 1;
+    const episode = session.attackEpisodes?.get(
+      `${entry.code}:${selectedTarget}`
+    );
+    if (episode) episode.switchback = true;
+  }
+  const candidates = new Array<RacecraftCandidateEvaluation>(
+    programs.length
+  );
+  let rejectedCount = 0;
+  let stagedRejectedCount = 0;
   const rejectedByConstraint = session.racecraftRejectedByConstraint ??
     (session.racecraftRejectedByConstraint = {});
-  for (const candidate of rejected)
+  for (let index = 0; index < programs.length; index++) {
+    const candidate = programs[index]!.evaluation;
+    candidates[index] = candidate;
+    if (candidate.feasible) continue;
+    rejectedCount++;
+    if (candidate.plan.mode !== 'ideal' &&
+        candidate.plan.mode !== 'pit' &&
+        (candidate.plan.mode === 'side-inside' ||
+          candidate.plan.mode === 'side-outside') &&
+        candidate.plan.surfaceAuthorization !== 'emergency' &&
+        candidate.plan.leaderCode != null)
+      stagedRejectedCount++;
     for (const veto of candidate.vetoes)
-      rejectedByConstraint[veto] = (rejectedByConstraint[veto] ?? 0) + 1;
+      rejectedByConstraint[veto] =
+        (rejectedByConstraint[veto] ?? 0) + 1;
+  }
+  session.racecraftRejectedCandidates =
+    (session.racecraftRejectedCandidates ?? 0) + rejectedCount;
+  session.racecraftStagedCandidatesRejected =
+    (session.racecraftStagedCandidatesRejected ?? 0) +
+    stagedRejectedCount;
   if (best && previousKind != null &&
       best.evaluation.kind !== previousKind)
     session.racecraftDecisionSwitches =
       (session.racecraftDecisionSwitches ?? 0) + 1;
-  const neighbors = exactInteractionNeighbors(session, active, entries);
-  const selectedFamilyId = best
-    ? racecraftStableFamilyId(
-        best.evaluation.kind,
-        best.evaluation.plan,
-        best.evaluation.slowPointOwnerCode
-      )
-    : null;
-  const selectedFamilyNumericId =
-    best?.evaluation.familyNumericId ?? null;
+  const defensiveLegality = best?.defensiveLegality ?? null;
+  const selectedDefensiveMove =
+    defensiveLegality?.legal === true &&
+    (
+      defensiveLegality.classification === 'new-move' ||
+      defensiveLegality.classification === 'continuation'
+    );
+  const inheritedDefensiveCommitment =
+    entry.racecraftDefensiveCommitment ??
+    previousPublication?.defensiveCommitment ??
+    null;
+  const carriedDefensiveCommitment =
+    racecraftDefensiveCommitmentIsActive(
+      inheritedDefensiveCommitment,
+      entry.prog
+    )
+      ? inheritedDefensiveCommitment
+      : null;
   const decision: RacecraftDecision = {
     at: session.t,
     selectedKind: best?.evaluation.kind ?? null,
@@ -6996,13 +6567,28 @@ export function evaluateRacecraftDecision(
     chosenUtilization: best?.evaluation.gripUtilization ?? 0,
     selectedLongitudinalProgram: best
       ? {
-          progress: [...best.speedLaw.progress],
-          speed: [...best.speedLaw.speed],
+          envelope: cloneSpeedEnvelope(best.speedLaw.envelope),
           brakingEffort: best.speedLaw.brakingEffort,
-          slowPointOwnerCode: best.evaluation.slowPointOwnerCode,
+          slowPointOwnerCode: best.speedLaw.longitudinalOwnerCode,
           bindingSlowPoint: best.speedLaw.slowPoint
         }
       : null,
+    cornerOwnershipAssertion: best?.ownershipAssertion ?? null,
+    defensiveCommitment:
+      defensiveLegality?.commitment ??
+      carriedDefensiveCommitment,
+    defensiveTargetCode: selectedDefensiveMove
+      ? defensiveLegality.targetCode
+      : null,
+    defensiveCornerId: selectedDefensiveMove
+      ? defensiveLegality.cornerId
+      : null,
+    defensiveContinuation:
+      defensiveLegality?.classification === 'continuation',
+    defensiveApproachConflictAuthorized:
+      selectedDefensiveMove &&
+      defensiveLegality.approachConflictAuthorized,
+    defenderReclaim: best?.defenderReclaim ?? false,
     economics: economics.map(context => ({
       rivalCode: context.rival.code,
       role: context.role,
@@ -7012,60 +6598,40 @@ export function evaluateRacecraftDecision(
       reopportunitySeconds: context.reopportunitySeconds,
       positionValueSeconds: context.positionValueSeconds
     })),
-    certificate: makeDecisionCertificate(
-      session,
-      active,
-      neighbors,
-      selectedFamilyNumericId,
-      selectedFamilyId,
-      false
-    ),
     candidates
   };
-  const frozenEntries = [
-    active,
-    ...selection.hazards.map(hazard => hazard.other)
-  ].filter((candidate, index, all) =>
-    all.findIndex(value => value.code === candidate.code) === index
-  ).map(freezeActiveEntry);
-  const frozenByCode = new Map(frozenEntries.map(candidate => [
-    candidate.code,
-    candidate
-  ]));
-  const frozenActive = frozenByCode.get(active.code)!;
-  const frozenHazards: Hazard[] = selection.hazards.map(hazard => {
-    const frozen: Hazard = {
-      ...hazard,
-      other: frozenByCode.get(hazard.other.code)!,
-      rivalSweepGeometry: null
-    };
-    if (hazard.bestPlanContinuation)
-      frozen.bestPlanContinuation = {
-        ...hazard.bestPlanContinuation,
-        speedLaw: {
-          ...hazard.bestPlanContinuation.speedLaw,
-          progress: [...hazard.bestPlanContinuation.speedLaw.progress],
-          speed: [...hazard.bestPlanContinuation.speedLaw.speed]
-        },
-        stations: hazard.bestPlanContinuation.stations.map(station => ({
-          ...station
-        })),
-        evaluationClaims:
-          new Map(hazard.bestPlanContinuation.evaluationClaims)
-      };
-    else frozen.bestPlanContinuation = null;
-    return frozen;
-  });
-  standingDecisionEvaluations.set(decision, {
-    at: session.t,
-    session: freezeStandingSession(session, frozenEntries),
-    entry: frozenActive,
-    entries: frozenEntries,
-    evaluationClaims: selection.evaluationClaims,
-    programs,
-    hazards: frozenHazards,
-    selected: best
-  });
+  if (best &&
+      best.evaluation.plan.mode !== 'ideal' &&
+      best.evaluation.plan.mode !== 'pit' &&
+      (best.evaluation.plan.mode === 'side-inside' ||
+        best.evaluation.plan.mode === 'side-outside') &&
+      best.evaluation.plan.surfaceAuthorization !== 'emergency') {
+    session.racecraftStagedCandidatesSelected =
+      (session.racecraftStagedCandidatesSelected ?? 0) + 1;
+    if (best.speedLaw.stagedClearanceProgressMetres != null)
+      session.racecraftStagedCandidatesCleared =
+        (session.racecraftStagedCandidatesCleared ?? 0) + 1;
+  }
+  if (best?.ownershipAssertion) {
+    session.racecraftOwnershipAssertions =
+      (session.racecraftOwnershipAssertions ?? 0) + 1;
+  }
+  if (best?.defenderReclaim) {
+    session.racecraftDefenderReclaims =
+      (session.racecraftDefenderReclaims ?? 0) + 1;
+  }
+  if (selectedDefensiveMove &&
+      defensiveLegality.classification === 'new-move') {
+    if (defensiveLegality.outcome === 'room-protected')
+      session.racecraftDefensiveRoomProtectedCovers =
+        (session.racecraftDefensiveRoomProtectedCovers ?? 0) + 1;
+    else
+      session.racecraftDefensiveAuthorizedSideClosures =
+        (session.racecraftDefensiveAuthorizedSideClosures ?? 0) + 1;
+  }
+  if (decision.defensiveApproachConflictAuthorized)
+    session.racecraftDefensiveAuthorizedApproachConflicts =
+      (session.racecraftDefensiveAuthorizedApproachConflicts ?? 0) + 1;
   commitBattleEconomicsSelection(active, best, economics);
   entry.racecraftDecision = decision;
   session.racecraftCandidatesEvaluated =
@@ -7078,8 +6644,38 @@ export function evaluateRacecraftDecision(
     session.racecraftDecisionSamples =
       (session.racecraftDecisionSamples ?? 0) + 1;
   session.racecraftPathsMaterialized ??= 0;
+  accumulateSelectedJ(session, entry, best?.evaluation ?? null);
   appendDecisionLog(session, entry, decision);
   return decision;
+}
+
+const activeDirectionalEvaluations = new WeakSet<Session>();
+
+/** One owner may have only one live tactical evaluation on its due slot. */
+export function evaluateRacecraftDecision(
+  session: Session,
+  entry: Entry,
+  entries: readonly Entry[],
+  actionableOwnershipViews: readonly ActionableOwnershipAssertion[] =
+    EMPTY_OWNERSHIP_VIEWS
+): RacecraftDecision | null {
+  if (activeDirectionalEvaluations.has(session)) {
+    recordRacecraftNestedResponseEvaluation(session);
+    throw new Error(
+      `${entry.code} attempted a nested directional evaluation`
+    );
+  }
+  activeDirectionalEvaluations.add(session);
+  try {
+    return evaluateRacecraftDecisionOnce(
+      session,
+      entry,
+      entries,
+      actionableOwnershipViews
+    );
+  } finally {
+    activeDirectionalEvaluations.delete(session);
+  }
 }
 
 function hasLiveRacecraftInteraction(

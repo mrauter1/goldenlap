@@ -1,4 +1,9 @@
-import type { LineupEntry, Session, TyreCompound } from '../session/model';
+import type {
+  LineupEntry,
+  PredictiveSafetyHz,
+  Session,
+  TyreCompound
+} from '../session/model';
 import type { CalendarEventDefinition } from '../shared/types';
 
 export type GamePhase =
@@ -86,6 +91,7 @@ export interface GameState {
   weekLu?: LineupEntry[];
   startTyre?: TyreCompound[];
   qualiBest?: number[];
+  predictiveSafetyHz: PredictiveSafetyHz;
 }
 
 export function createGameState(
@@ -108,6 +114,7 @@ export function createGameState(
     grid: null,
     lastRes: null,
     S: null,
+    predictiveSafetyHz: 10,
     calendar: calendar.map(event => ({ ...event }))
   };
 }

@@ -43,6 +43,6 @@ describe('session traffic cadence', () => {
     const session = trafficSession();
     for (let step = 0; step < 121; step++)
       stepSession(session, 1 / 120);
-    expect(session.racecraftDecisionTick).toBe(29);
+    expect(session.racecraftTrafficEpoch).toBe(29);
   });
 });

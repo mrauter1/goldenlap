@@ -92,6 +92,18 @@ function tyreCompound(data: SheetActionData): TyreCompound | null {
 export function createSheetController(options: SheetOptions): SheetController {
   const { state, elements, tracks, audio, effects, callbacks } = options;
 
+  function predictiveSafetySetting(): string {
+    return `
+      <label class="inline-note" style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+        <input type="checkbox" data-setting="predictiveSafety30"
+          ${state.predictiveSafetyHz === 30 ? 'checked' : ''}
+          style="margin-top:2px">
+        <span><b>30 HZ PREDICTIVE SAFETY</b><br>
+        Unchecked runs the identical collision-prediction checks at 10 Hz
+        for lower CPU use. The choice applies only to the next session.</span>
+      </label>`;
+  }
+
   function show(html: string): void {
     elements.sheetBody.innerHTML = html;
     elements.sheet.classList.add('on');
@@ -203,6 +215,8 @@ export function createSheetController(options: SheetOptions): SheetController {
       <div class="gridopts">${philosophyCards}</div>
       <div class="secH">SPONSOR</div>
       <div class="gridopts">${sponsorCards}</div>
+      <div class="secH">PERFORMANCE</div>
+      ${predictiveSafetySetting()}
       <div class="btnrow">
         <button class="btn ghostbtn" data-act="backMenu">BACK</button>
         <button class="btn gold" data-act="startSeason" ${staffReady(state) ? '' : 'disabled'}>START THE SEASON</button>
@@ -463,6 +477,8 @@ export function createSheetController(options: SheetOptions): SheetController {
         <div style="flex:1.1;min-width:290px"><div class="secH">STARTING TYRES</div>${tyrePick}
           <div class="secH">PARTS — ${escapeHtml(firstDriver.name)} ⇄ ${escapeHtml(secondDriver.name)}</div>${swapRows}
           <div class="inline-note">Swapping moves the actual part — its level and wear travel with it.</div>
+          <div class="secH">PERFORMANCE</div>
+          ${predictiveSafetySetting()}
           <div class="btnrow" style="justify-content:flex-start"><button class="btn gold" data-act="startRace">LIGHTS OUT ▸</button></div>
         </div>
         <div style="flex:1;min-width:250px"><div class="secH">STARTING GRID</div><table class="tbl"><tr><th>P</th><th>DRIVER</th><th>TEAM</th><th>QUALI</th></tr>${rows}</table></div>
@@ -535,6 +551,13 @@ export function createSheetController(options: SheetOptions): SheetController {
     if (!target || !elements.sheetBody.contains(target)) return;
     const name = target.dataset.act;
     if (name) action(name, target.dataset);
+  });
+  elements.sheetBody.addEventListener('change', event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) ||
+        target.dataset.setting !== 'predictiveSafety30')
+      return;
+    state.predictiveSafetyHz = target.checked ? 30 : 10;
   });
 
   return {

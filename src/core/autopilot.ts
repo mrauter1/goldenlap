@@ -3,6 +3,8 @@ import {
   longitudinalAccelerationHeadroom,
   PHYS
 } from './physics';
+import { compactLateralGeometryAtProgress } from './lateral-program';
+import { speedEnvelopeAt } from './speed-envelope';
 import type {
   BotParameters, Car, CarInput, PathFollowerTuning, SpeedProfile, Track
 } from './model';
@@ -78,6 +80,7 @@ export function botStep(
   const margin = prm && prm.margin !== undefined ? prm.margin : 0.965;
   const muS = prm && prm.muScale !== undefined ? prm.muScale : 1;
   const downforceScale = Math.max(0, prm?.downforceScale ?? 1);
+  const powerScale = Math.max(0, prm?.powerScale ?? 1);
   const brakingEffort = clamp(
     prm?.brakingEffort ?? 0.82,
     BOT_BRAKING_EFFORT_MINIMUM,
@@ -87,6 +90,7 @@ export function botStep(
   const vCap = prm && prm.vCap !== undefined ? prm.vCap : Infinity;
   const path = prm && prm.path;
   const lane = prm?.lane;
+  const lateralProgram = prm?.lateralProgram;
   const pathOff = path && path.off ? path.off : null;
   const pathK = path && path.k ? path.k : track.kSm;
   const pathV = path?.v ?? prof.v;
@@ -94,7 +98,7 @@ export function botStep(
   const uniformLaneBias = lane?.uniformBias ?? null;
   const pathTuning = prm?.pathTuning ?? PATH_FOLLOWER_TUNING;
   const activeLane = !!lane && lane.count > 0;
-  const ownsPath = !!lane || !!pathOff;
+  const ownsPath = !!lateralProgram || !!lane || !!pathOff;
   const v = Math.hypot(car.vx, car.vy);
   const i = car.progIdx < 0 ? 0 : car.progIdx;
   const currentLaneDelta = activeLane
@@ -104,9 +108,20 @@ export function botStep(
     ? currentLaneDelta
     : -1;
   const fallbackBias = uniformLaneBias ?? latT;
-  const currentOffset = currentLaneSlot >= 0
-    ? lane!.off[currentLaneSlot]!
-    : (pathOff ? pathOff[i]! : 0) + fallbackBias;
+  const pathProgress =
+    prm?.pathProgress ?? lateralProgram?.startProgress ?? 0;
+  const currentAnalyticGeometry = lateralProgram
+    ? compactLateralGeometryAtProgress(
+        track,
+        lateralProgram,
+        pathProgress
+      )
+    : null;
+  const currentOffset = currentAnalyticGeometry
+    ? currentAnalyticGeometry.lateral
+    : currentLaneSlot >= 0
+      ? lane!.off[currentLaneSlot]!
+      : (pathOff ? pathOff[i]! : 0) + fallbackBias;
   const Ld = ownsPath
     ? clamp(
         pathTuning.lookaheadBase + v * pathTuning.lookaheadSpeed,
@@ -114,19 +129,31 @@ export function botStep(
         pathTuning.lookaheadMaximum
       )
     : clamp(4 + v * 0.5, 8, 42);
-  const ti = (i + Math.max(2, Math.round(Ld / track.step))) % N;
+  const lookaheadSteps = Math.max(2, Math.round(Ld / track.step));
+  const ti = (i + lookaheadSteps) % N;
   const targetLaneDelta = activeLane
     ? (ti - lane.startIndex + N) % N
     : -1;
   const targetLaneSlot = targetLaneDelta >= 0 && targetLaneDelta < lane!.count
     ? targetLaneDelta
     : -1;
-  const targetOffset = targetLaneSlot >= 0
-    ? lane!.off[targetLaneSlot]!
-    : (pathOff ? pathOff[ti]! : 0) + fallbackBias;
-  const targetCurvature = targetLaneSlot >= 0
-    ? lane!.k[targetLaneSlot]!
-    : pathK[ti]!;
+  const targetAnalyticGeometry = lateralProgram
+    ? compactLateralGeometryAtProgress(
+        track,
+        lateralProgram,
+        pathProgress + lookaheadSteps * track.step
+      )
+    : null;
+  const targetOffset = targetAnalyticGeometry
+    ? targetAnalyticGeometry.lateral
+    : targetLaneSlot >= 0
+      ? lane!.off[targetLaneSlot]!
+      : (pathOff ? pathOff[ti]! : 0) + fallbackBias;
+  const targetCurvature = targetAnalyticGeometry
+    ? targetAnalyticGeometry.curvature
+    : targetLaneSlot >= 0
+      ? lane!.k[targetLaneSlot]!
+      : pathK[ti]!;
   // pursue the offset path itself (racing line shifted by latT), so large
   // offsets — pit lanes, side-by-side running — track cleanly from any speed
   const latE = (car.x - track.x[i]!) * track.nx[i]! +
@@ -148,12 +175,43 @@ export function botStep(
   const pursuitGain = ownsPath ? pathTuning.pursuitGain : 2;
   const delta = Math.atan2(pursuitGain * Math.sin(err) * P.L, Ld) - dCte + feedForward;
   let steer = clamp(delta / Math.max(dMax, 1e-4), -1, 1);
-  // A race lane is already one composed speed law. Static profile/pit paths
-  // still need their own backward induction because they are raw profiles.
-  let inducedSpeed = currentLaneSlot >= 0
-    ? Math.max(0, lane!.v[currentLaneSlot]!)
-    : Infinity;
-  if (currentLaneSlot < 0) {
+  // Directional racecraft supplies one complete lower envelope. Static
+  // profile consumers still require the bounded induction because a raw
+  // profile contains local caps rather than runtime braking authority.
+  let fullDriveReachableSpeed: number | null = null;
+  let inducedSpeed = prm?.speedEnvelope
+    ? (() => {
+        const progress =
+          prm.speedProgress ?? prm.speedEnvelope!.startProgress;
+        const driveForce = Math.min(
+          P.Fmax * powerScale,
+          P.power * powerScale / Math.max(4, v)
+        );
+        const driveAcceleration = Math.max(
+          0,
+          Math.min(
+            (driveForce - P.kDrag * v * v - P.kRoll) / P.m,
+            longitudinalAccelerationHeadroom(
+              v,
+              targetCurvature,
+              muS,
+              downforceScale
+            )
+          )
+        );
+        const controlSeconds = Math.max(
+          Number.EPSILON,
+          prm.controlStepSeconds ?? 1 / 60
+        );
+        fullDriveReachableSpeed = v + driveAcceleration * controlSeconds;
+        const previewProgress = progress +
+          (v + fullDriveReachableSpeed) * 0.5 * controlSeconds;
+        return speedEnvelopeAt(prm.speedEnvelope!, previewProgress);
+      })()
+    : currentLaneSlot >= 0
+      ? Math.max(0, lane!.v[currentLaneSlot]!)
+      : Infinity;
+  if (!prm?.speedEnvelope && currentLaneSlot < 0) {
     const horizon = Math.min(
       N - 2,
       Math.ceil(BOT_BRAKING_HORIZON_METRES / track.step)
@@ -183,6 +241,17 @@ export function botStep(
   // time can make an overspeed car unable to shed speed.
   const brake = clamp((v - vt) * 0.8, 0, 1);
   let throttle = brake > 0.04 ? 0 : clamp((vt - v) * 0.6, 0, 1);
+  if (brake <= 0.04 &&
+      fullDriveReachableSpeed != null &&
+      fullDriveReachableSpeed > v + Number.EPSILON)
+    throttle = Math.max(
+      throttle,
+      clamp(
+        (vt - v) / (fullDriveReachableSpeed - v),
+        0,
+        1
+      )
+    );
   // never accelerate while an axle is saturated (above walking pace — at a
   // standstill the slip angle is just steering lock, not wheelspin)
   if (v > 4 && (Math.abs(car.slipF) > 0.11 || Math.abs(car.slipR) > 0.11)) throttle = 0;

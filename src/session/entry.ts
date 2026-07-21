@@ -7,6 +7,8 @@ import { clamp } from '../shared/math';
 import { random } from '../shared/rng';
 import { rollMistake, stepRecovery } from './incidents';
 import { initializeLineCharacter } from './racecraft/feel';
+import { applyRacecraftPredictiveSafetyVeto } from
+  './racecraft/reactive-safety';
 import { obligationsFor } from './racecraft/relations';
 import {
   clearLaneProgram,
@@ -323,19 +325,21 @@ export function stepEntry(
     const pitPathAuthority = e.pathPlan?.mode === 'pit' && !!e.path;
     const drivePath = inPitState
       ? e.pathPlan?.mode === 'pit' ? e.path : undefined
-      : e.path ?? tr.idealPath;
-    const hasLaneAuthority = e.racecraftPathPlan != null ||
-      e.laneProgram.points.length > 0 ||
-      Math.abs(e.laneProgram.bias) > Number.EPSILON ||
-      e.laneProgram.binding != null;
+      : e.racecraftLateralProgram
+        ? undefined
+        : e.path ?? tr.idealPath;
+    const transitionLaneAuthority = !e.racecraftLateralProgram &&
+      (e.laneProgram.points.length > 0 ||
+        Math.abs(e.laneProgram.bias) > Number.EPSILON ||
+        e.laneProgram.binding != null);
     const driveLane = pitPathAuthority
       ? e.laneBuffer ?? evaluateLaneProgram(S, e)
-      : !inPitState
-        ? e.laneBuffer ??
-          (hasLaneAuthority ? evaluateLaneProgram(S, e) : undefined)
+      : !inPitState && transitionLaneAuthority
+        ? e.laneBuffer ?? evaluateLaneProgram(S, e)
         : undefined;
-    // Outside the pit lane, the evaluated lane span is the only lateral
-    // authority. Pit retains its dedicated sampled path and residual control.
+    // Pit retains its dedicated sampled path. Outside it, the controller
+    // consumes the installed compact lateral and longitudinal authorities
+    // directly, without reconstructing a 30 Hz lane buffer.
     const driveLateral = inPitState && !e.path ? lat : 0;
     e.inp = botStep(tr, S.prof, c, {
       margin: clamp(entryMargin(e, S, S.config.tuneBonus, S.wet) + flowOff(e, S), 0.85, 0.985),
@@ -349,9 +353,23 @@ export function stepEntry(
       controlStepSeconds: h * 2,
       lat: driveLateral, vCap,
       ...(drivePath ? { path: drivePath } : {}),
-      ...(driveLane ? { lane: driveLane } : {})
+      ...(driveLane ? { lane: driveLane } : {}),
+      ...(!inPitState && e.racecraftLateralProgram
+        ? {
+            lateralProgram: e.racecraftLateralProgram,
+            pathProgress: e.prog
+          }
+        : {}),
+      ...(!inPitState && e.racecraftLongitudinalProgram
+        ? {
+            speedEnvelope: e.racecraftLongitudinalProgram.envelope,
+            speedProgress: e.prog
+          }
+        : {})
     });
   }
+
+  applyRacecraftPredictiveSafetyVeto(e);
 
   // ---- physics ----
   const inLane = e.state === 'pitIn' || e.state === 'pitOut';

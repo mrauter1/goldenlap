@@ -1,6 +1,8 @@
 import { clamp } from '../shared/math';
 import { random } from '../shared/rng';
 import type { CarModifiers, Track } from '../core/model';
+import { compactLateralGeometryAtProgress } from
+  '../core/lateral-program';
 import { availableDeceleration } from '../core/physics';
 import type {
   Entry, PaceMode, RaceSession, Session, TyreCompound, TyreState
@@ -210,8 +212,12 @@ export function entryDynamicMu(entry: Entry, session: Session): number {
   const index = Math.max(0, entry.car?.progIdx ?? 0) % session.trk.n;
   const curvature = Math.abs(entry.pathPlan?.mode === 'pit' && entry.path
     ? entry.path.k[index]!
-    : entry.laneBuffer?.startIndex === index && entry.laneBuffer.count > 0
-      ? entry.laneBuffer.k[0]!
+    : entry.racecraftLateralProgram
+      ? compactLateralGeometryAtProgress(
+          session.trk,
+          entry.racecraftLateralProgram,
+          entry.prog
+        ).curvature
       : session.trk.idealPath?.k[index] ?? session.trk.kSm[index]!);
   return entryDynamicMuAt(entry, session, entry.spd, curvature);
 }

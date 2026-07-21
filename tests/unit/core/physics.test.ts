@@ -9,7 +9,8 @@ import {
   longitudinalAccelerationHeadroom,
   longitudinalGripHeadroomFraction,
   PHYS,
-  wakeEffect
+  wakeEffect,
+  wakeStrength
 } from '../../../src/core/physics';
 
 describe('shared braking model', () => {
@@ -23,6 +24,13 @@ describe('shared braking model', () => {
     expect(sideDraft.drag).toBeGreaterThan(0);
     expect(sideDraft.drag).toBeLessThan(aligned.drag);
     expect(clear).toEqual({ drag: 0, grip: 0 });
+    expect(wakeStrength(
+      30,
+      2.5,
+      60,
+      parameters.characteristicDistance,
+      parameters.spreadRate
+    )).toBe(sideDraft.drag);
   });
 
   test('derives increasing grip from aero load and finite stopping distances', () => {

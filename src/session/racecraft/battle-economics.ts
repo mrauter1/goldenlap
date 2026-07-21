@@ -76,12 +76,6 @@ export interface PositionValueInput {
 export interface BattleSpendInput {
   /** Measured residual loss of entering this attack family. */
   readonly measuredAttemptLossSeconds: number;
-  /**
-   * Deterministic contested-region term already computed by the evaluator.
-   * Q is an incremental continuation delta, so a cheaper surviving response
-   * may make this signed even though measured losses remain non-negative.
-   */
-  readonly contestSeconds: number;
   /** Integrated loss from the measured contact-rate curve. */
   readonly measuredProximitySeconds: number;
 }
@@ -319,8 +313,7 @@ export function battleSpendSeconds(input: BattleSpendInput): number {
   return nonNegative(
     'measuredAttemptLossSeconds',
     input.measuredAttemptLossSeconds
-  ) + finite('contestSeconds', input.contestSeconds) +
-    nonNegative(
+  ) + nonNegative(
       'measuredProximitySeconds',
       input.measuredProximitySeconds
     );

@@ -37,19 +37,15 @@ import {
 } from '../strategy';
 import {
   physicalLaneMoveSeconds,
-  sideAgreementCornerFamilyMember,
   sideAgreementBounds,
   sideAgreementEnvelopeAt,
   evaluateLaneEta,
   type LaneEvaluation
 } from './geometry';
-import {
-  racecraftFamilyGeometryAt,
-  type RacecraftFamilyEntry
-} from './family-geometry';
+import { compileCompactLateralProgram } from './compact-path';
 export const LANE_BUFFER_CAPACITY = 256;
-// The controller looks 240 m ahead; the extra runway retains a complete
-// local authority while the 30 Hz traffic update advances between samples.
+// Sampled pit/transition control retains enough runway for the controller's
+// complete braking lookahead while traffic advances between updates.
 export const LANE_BUFFER_DISTANCE_METRES = BOT_BRAKING_HORIZON_METRES;
 
 const laneSurfaceScratch: SurfaceExposureScratch = {
@@ -163,6 +159,8 @@ export function installRacecraftPathPlan(
   binding: string | null = reason
 ): void {
   if (entry.racecraftPathPlan === plan) {
+    entry.racecraftLateralProgram ??=
+      compileCompactLateralProgram(track, plan);
     entry.laneProgram.reason = reason;
     entry.laneProgram.binding = binding;
     if (plan.surfaceAuthorization === 'emergency')
@@ -194,6 +192,8 @@ export function installRacecraftPathPlan(
     entry.laneProgram.surfaceAuthorization = 'emergency';
   else delete entry.laneProgram.surfaceAuthorization;
   entry.racecraftPathPlan = plan;
+  entry.racecraftLateralProgram =
+    compileCompactLateralProgram(track, plan);
   recordLaneEdit(entry, reason);
   delete entry._laneBufferRevision;
   assertLaneProgramPinned(track, entry);
@@ -209,6 +209,7 @@ export function setLaneProgram(
   surfaceAuthorization: SurfaceAuthorization = 'normal'
 ): void {
   delete entry.racecraftPathPlan;
+  delete entry.racecraftLateralProgram;
   delete entry._laneTargetAbsolute;
   delete entry._laneBufferRevision;
   const pinned: LanePoint = { s: entry.prog, eta: currentEta(track, entry) };
@@ -250,6 +251,7 @@ function setTwoPointLaneProgram(
   targetEta: number
 ): void {
   delete entry.racecraftPathPlan;
+  delete entry.racecraftLateralProgram;
   delete entry._laneBufferRevision;
   const points = entry.laneProgram.points;
   const first = points[0] ?? { s: 0, eta: 0 };
@@ -275,6 +277,7 @@ export function clearLaneProgram(entry: Entry, reason = 'ideal'): void {
     Math.abs(entry.laneProgram.bias) > Number.EPSILON ||
     entry.laneProgram.surfaceAuthorization != null;
   delete entry.racecraftPathPlan;
+  delete entry.racecraftLateralProgram;
   entry.laneProgram.points.length = 0;
   entry.laneProgram.reason = reason;
   entry.laneProgram.binding = null;
@@ -478,6 +481,11 @@ function writeLaneSpeedSamples(
   entry: Entry,
   buffer: LaneSampleBuffer
 ): void {
+  // Compact tactical authority owns the controller's complete continuous
+  // envelope. The lane buffer still supplies transition lateral geometry during
+  // a transition, but constructing a second sampled speed authority here
+  // would duplicate hot-loop work whose values are never consumed.
+  if (entry.racecraftLongitudinalProgram) return;
   const track = session.trk;
   const referencePath = entry.pathPlan?.mode === 'pit' && entry.path
     ? entry.path
@@ -512,39 +520,7 @@ function writeLaneSpeedSamples(
     ) * margin;
   }
 
-  const longitudinalProgram = entry.racecraftLongitudinalProgram;
-  if (longitudinalProgram?.progress.length &&
-      longitudinalProgram.progress.length ===
-        longitudinalProgram.speed.length) {
-    let programIndex = 0;
-    const lastProgramIndex = longitudinalProgram.progress.length - 1;
-    for (let slot = 0; slot < buffer.count; slot++) {
-      const progress = entry.prog + slot * track.step;
-      while (programIndex < lastProgramIndex &&
-          longitudinalProgram.progress[programIndex + 1]! < progress)
-        programIndex++;
-      if (progress > longitudinalProgram.progress[lastProgramIndex]!)
-        continue;
-      const fromIndex = Math.min(programIndex, lastProgramIndex);
-      const toIndex = Math.min(fromIndex + 1, lastProgramIndex);
-      const fromProgress = longitudinalProgram.progress[fromIndex]!;
-      const toProgress = longitudinalProgram.progress[toIndex]!;
-      const u = toProgress > fromProgress
-        ? clamp(
-            (progress - fromProgress) / (toProgress - fromProgress),
-            0,
-            1
-          )
-        : 0;
-      const programSpeed =
-        longitudinalProgram.speed[fromIndex]! +
-        (longitudinalProgram.speed[toIndex]! -
-          longitudinalProgram.speed[fromIndex]!) * u;
-      buffer.v[slot] = Math.min(buffer.v[slot]!, programSpeed);
-    }
-  }
-
-  const slowPoint = longitudinalProgram ? null : entry.trafficSlowPoint;
+  const slowPoint = entry.trafficSlowPoint;
   if (slowPoint) {
     const targetDistance = Math.max(0, slowPoint.distance);
     let targetSlot = targetDistance === 0 ? 0 : -1;
@@ -603,8 +579,6 @@ function writeLaneSpeedSamples(
     );
   }
 
-  if (longitudinalProgram) return;
-
   for (let slot = buffer.count - 2; slot >= 0; slot--) {
     const index = (buffer.startIndex + slot) % track.n;
     const referenceSpeed = referencePath.v[index]!;
@@ -648,75 +622,6 @@ function evaluateSampledPitPath(
     buffer.mu[slot] = 1;
     buffer.drag[slot] = 0;
   }
-}
-
-function isCertifiedAgreementFamily(
-  session: Session,
-  entry: Entry,
-  plan: PathPlan
-): boolean {
-  if (plan.mode === 'ideal' || plan.mode === 'pit' ||
-      !plan.cornerId || !plan.lineKind || !plan.lineTerminal)
-    return false;
-  const corner = session.trk.corners.find(value =>
-    value.id === plan.cornerId);
-  const certified = corner
-    ? sideAgreementCornerFamilyMember(session, entry, corner)
-    : null;
-  return certified?.kind === plan.lineKind &&
-    certified.terminal === plan.lineTerminal;
-}
-
-function evaluateAnalyticRacecraftPlan(
-  session: Session,
-  entry: RacecraftFamilyEntry,
-  buffer: LaneSampleBuffer,
-  corridor: { minimum: number; maximum: number } | null
-): boolean {
-  const track = session.trk;
-  const plan = entry.racecraftPathPlan!;
-  const certifiedAgreementMember = isCertifiedAgreementFamily(
-    session,
-    entry,
-    plan
-  );
-  let agreementViolation = false;
-  let trackIndex = buffer.startIndex;
-  for (let slot = 0; slot < buffer.count; slot++) {
-    const progress = entry.prog + slot * track.step;
-    const geometry = racecraftFamilyGeometryAt(
-      track,
-      entry,
-      progress,
-      plan
-    );
-    const authoredOffset = geometry.lateral;
-    if (corridor && !certifiedAgreementMember) {
-      const agreementEnvelope = sideAgreementEnvelopeAt(
-        track,
-        trackIndex,
-        corridor,
-        plan.surfaceAuthorization ?? 'normal'
-      );
-      if (agreementEnvelope.viable === false ||
-          authoredOffset < agreementEnvelope.minimum - 1e-9 ||
-          authoredOffset > agreementEnvelope.maximum + 1e-9)
-        agreementViolation = true;
-    }
-    buffer.off[slot] = authoredOffset;
-    buffer.k[slot] = geometry.curvature;
-    buffer.ds[slot] = track.step * geometry.q;
-    writeLaneSurfaceSample(
-      track,
-      buffer,
-      slot,
-      trackIndex,
-      authoredOffset
-    );
-    trackIndex++;
-    if (trackIndex === track.n) trackIndex = 0;
-  }
-  return agreementViolation;
 }
 
 function evaluateDeformedProgram(
@@ -836,26 +741,10 @@ export function evaluateLaneProgram(
     entry._laneBufferRevision = entry.laneEdits ?? 0;
     return buffer;
   }
-  if (entry.racecraftPathPlan && entry.car) {
-    buffer.count = Math.min(
-      track.n,
-      LANE_BUFFER_CAPACITY,
-      Math.ceil(LANE_BUFFER_DISTANCE_METRES / track.step) + 2
+  if (entry.racecraftPathPlan)
+    throw new Error(
+      `${entry.code} compact racecraft authority cannot be sampled into a lane buffer`
     );
-    buffer.uniformBias = null;
-    recordAgreementGeometryViolation(
-      session,
-      evaluateAnalyticRacecraftPlan(
-        session,
-        entry as RacecraftFamilyEntry,
-        buffer,
-        corridor
-      )
-    );
-    writeLaneSpeedSamples(session, entry, buffer);
-    entry._laneBufferRevision = entry.laneEdits ?? 0;
-    return buffer;
-  }
   const last = entry.laneProgram.points[entry.laneProgram.points.length - 1];
   if (last && entry.prog >= last.s - 1e-9) {
     entry.laneProgram.bias = last.eta;

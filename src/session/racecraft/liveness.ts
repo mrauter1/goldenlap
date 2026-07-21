@@ -1,5 +1,6 @@
 import type { Car, PathMode } from '../../core/model';
 import { carBodyCircleClearance } from '../../core/collision';
+import { speedEnvelopeAt } from '../../core/speed-envelope';
 import type { Entry, Session } from '../model';
 import { longitudinalBodyProjection } from './geometry';
 import { obligationsFor } from './relations';
@@ -40,7 +41,9 @@ function declaredStationaryCause(session: Session, entry: ActiveEntry): string |
       entry.trafficSlowPoint.speed < STALL_CRAWL_SPEED_MPS)
     return `safe-braking:${entry.trafficSlowPoint.ownerCode}`;
   const program = entry.racecraftLongitudinalProgram;
-  if (program && program.speed[0]! < STALL_CRAWL_SPEED_MPS &&
+  if (program &&
+      speedEnvelopeAt(program.envelope, program.envelope.startProgress) <
+        STALL_CRAWL_SPEED_MPS &&
       program.slowPointOwnerCode)
     return `safe-braking:${program.slowPointOwnerCode}`;
   return null;

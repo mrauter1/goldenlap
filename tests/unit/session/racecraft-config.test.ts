@@ -16,7 +16,7 @@ import { TRAF_DT } from '../../../src/session/strategy';
 
 describe('global racecraft calibration surface', () => {
   test('contains only sourced physical and behavioral calibration', () => {
-    expect(RACECRAFT_CALIBRATION_DEFINITIONS.length).toBeLessThanOrEqual(9);
+    expect(RACECRAFT_CALIBRATION_DEFINITIONS.length).toBeLessThanOrEqual(11);
     expect(new Set(RACECRAFT_CALIBRATION_DEFINITIONS.map(item => item.key)).size)
       .toBe(RACECRAFT_CALIBRATION_DEFINITIONS.length);
     expect(RACECRAFT_CALIBRATION_DEFINITIONS.map(item => String(item.key)).sort())
@@ -29,6 +29,22 @@ describe('global racecraft calibration surface', () => {
       expect(definition.owner.length).toBeGreaterThan(0);
       expect(definition.rationale.length).toBeGreaterThan(0);
     }
+    expect(RACECRAFT_CALIBRATION_DEFAULTS.nearRubClearanceMetres)
+      .toBe(0.15);
+    expect(RACECRAFT_CALIBRATION_DEFINITIONS.find(definition =>
+      definition.key === 'nearRubClearanceMetres'
+    )).toMatchObject({
+      unit: 'm',
+      owner: 'sporting near-rub preference'
+    });
+    expect(RACECRAFT_CALIBRATION_DEFAULTS.defensiveBlockNoticeSeconds)
+      .toBe(1);
+    expect(RACECRAFT_CALIBRATION_DEFINITIONS.find(definition =>
+      definition.key === 'defensiveBlockNoticeSeconds'
+    )).toMatchObject({
+      unit: 's',
+      owner: 'sporting defensive-block safety'
+    });
   });
 
   test('applies a scoped override and restores defaults even after an error', () => {

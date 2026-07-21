@@ -31,6 +31,11 @@ function localSnapshot(): object {
     seed,
     clean: runSingleCar(built, { laps: 1, seed }),
     pair: runFocusedSession(built, { scenario: 'pair', seed }),
+    pairSafety30: runFocusedSession(built, {
+      scenario: 'pair',
+      seed,
+      predictiveSafetyHz: 30
+    }),
     pit: runFocusedSession(built, { scenario: 'pit', seed }),
     priority: runFocusedSession(built, { scenario: 'priority', seed }),
     classification: runFocusedSession(built, { scenario: 'classification', seed })
@@ -136,12 +141,21 @@ try {
   const document = {
     schemaVersion: 1,
     numericTolerance,
-    scenarios: ['clean', 'pair', 'pit', 'priority', 'classification'],
+    scenarios: [
+      'clean',
+      'pair',
+      'pairSafety30',
+      'pit',
+      'priority',
+      'classification'
+    ],
     snapshot: local
   };
   if (record) {
     writeFileSync(fixturePath, `${JSON.stringify(document, null, 2)}\n`);
-    console.log('Recorded headless parity: clean, pair, pit, priority, and classification');
+    console.log(
+      'Recorded headless parity: clean, pair (10/30 Hz safety), pit, priority, and classification'
+    );
   } else if (printOnly) {
     console.log(JSON.stringify(document, null, 2));
   } else {
@@ -152,7 +166,9 @@ try {
       for (const difference of fixtureDifferences.slice(0, 80)) console.error(`- ${difference}`);
       process.exit(1);
     }
-    console.log('Headless parity OK: clean, pair, pit, priority, and classification match');
+    console.log(
+      'Headless parity OK: clean, pair (10/30 Hz safety), pit, priority, and classification match'
+    );
   }
 } catch (error) {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));

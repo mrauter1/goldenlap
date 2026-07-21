@@ -10,7 +10,13 @@ import {
   type BuiltTrack,
   type SampledPath
 } from '../../../src/core/model';
+import { compactLateralGeometryAtProgress } from
+  '../../../src/core/lateral-program';
 import { sampleCornerLineEtaAnalytic } from '../../../src/core/corner-lines';
+import {
+  speedEnvelopeAt,
+  speedEnvelopeFromSamples
+} from '../../../src/core/speed-envelope';
 import { makeCar } from '../../../src/core/physics-engine';
 import {
   cornerSpeedForGrip,
@@ -37,10 +43,15 @@ import {
 import {
   racecraftFamilyStateAt
 } from '../../../src/session/racecraft/family-geometry';
+import { updateRacecraftSideAgreements } from
+  '../../../src/session/racecraft/corridor-planner';
 import {
-  publishRacecraftClaimSnapshot,
-  updateRacecraftSideAgreements
-} from '../../../src/session/racecraft/corridor-planner';
+  racecraftClaimSegmentCount,
+  racecraftClaimSegmentEndTime,
+  racecraftClaimStateAtTime
+} from '../../../src/session/racecraft/claim';
+import { publishRacecraftTacticalPublication } from
+  '../../../src/session/racecraft/publication';
 import {
   sideAgreementBounds,
   sideAgreementEnvelopeAt
@@ -117,11 +128,11 @@ function publishAllClaims(session: Session): void {
       entry.state === 'pitOut')
   ) as Array<Entry & { car: NonNullable<Entry['car']> }>;
   updateRacecraftSideAgreements(session, active);
-  publishRacecraftClaimSnapshot(
-    session,
-    session.entries,
-    new Set(active.map(entry => entry.code))
-  );
+  const epoch = session.racecraftTrafficEpoch ?? 0;
+  for (const entry of active) {
+    entry._racecraftLastDecisionTrafficEpoch = epoch;
+    publishRacecraftTacticalPublication(session, entry, epoch);
+  }
 }
 
 function straightIndex(): number {
@@ -286,13 +297,18 @@ describe('lane program authority', () => {
     expect(entry.laneProgram.points).toHaveLength(0);
     expect(() => assertLaneProgramPinned(track, entry)).not.toThrow();
 
-    const lane = evaluateLaneProgram(session, entry);
+    const program = entry.racecraftLateralProgram!;
     const phaseSlots = [
       Math.max(1, Math.floor(acquisitionSamples / 2)),
       apexSamples,
       exitSamples
     ];
-    expect(exitSamples).toBeLessThan(lane.count);
+    expect(program.endProgress).toBeGreaterThanOrEqual(
+      entry.prog + exitSamples * track.step
+    );
+    expect(() => evaluateLaneProgram(session, entry)).toThrow(
+      'cannot be sampled into a lane buffer'
+    );
     for (const slot of phaseSlots) {
       const progress = entry.prog + slot * track.step;
       const expected = racecraftFamilyStateAt(
@@ -301,9 +317,14 @@ describe('lane program authority', () => {
         progress,
         plan
       );
-      expect(lane.off[slot]).toBeCloseTo(expected.lateral, 14);
-      expect(lane.k[slot]).toBeCloseTo(expected.curvature, 14);
-      expect(lane.ds[slot]! / track.step).toBeCloseTo(expected.q, 14);
+      const actual = compactLateralGeometryAtProgress(
+        track,
+        program,
+        progress
+      );
+      expect(actual.lateral).toBeCloseTo(expected.lateral, 14);
+      expect(actual.curvature).toBeCloseTo(expected.curvature, 14);
+      expect(actual.q).toBeCloseTo(expected.q, 14);
     }
   });
 
@@ -346,7 +367,11 @@ describe('lane program authority', () => {
       plan,
       'racecraft:self'
     );
-    const lane = evaluateLaneProgram(laneSession(), entry);
+    const geometry = compactLateralGeometryAtProgress(
+      track,
+      entry.racecraftLateralProgram!,
+      entry.prog
+    );
     const previous = (start - 1 + track.n) % track.n;
     const next = (start + 1) % track.n;
     const baseCurvature = track.kSm[start]!;
@@ -374,10 +399,11 @@ describe('lane program authority', () => {
     const resetCurvature =
       baseCurvature / Math.abs(longitudinalScale);
 
-    expect(lane.off[0]).toBe(entry.latNow);
-    expect(lane.ds[0]! / track.step).toBeCloseTo(q, 12);
-    expect(lane.k[0]).toBeCloseTo(expectedCurvature, 12);
-    expect(Math.abs(lane.k[0]! - resetCurvature)).toBeGreaterThan(1e-5);
+    expect(geometry.lateral).toBe(entry.latNow);
+    expect(geometry.q).toBeCloseTo(q, 12);
+    expect(geometry.curvature).toBeCloseTo(expectedCurvature, 12);
+    expect(Math.abs(geometry.curvature - resetCurvature))
+      .toBeGreaterThan(1e-5);
   });
 
   test('feeds botStep the same samples as an equivalent full reference path', () => {
@@ -458,8 +484,14 @@ describe('lane program authority', () => {
     expect(firstClaim.trusted).toBe(true);
     expect(secondClaim.trusted).toBe(true);
     for (const claim of [firstClaim, secondClaim])
-      for (let index = 0; index < claim.stations.length; index++)
-        expect(claim.stations.v[index]).toBeGreaterThanOrEqual(0);
+      for (let index = 0;
+        index < racecraftClaimSegmentCount(claim);
+        index++)
+        expect(racecraftClaimStateAtTime(
+          built.tr,
+          claim,
+          racecraftClaimSegmentEndTime(claim, index)
+        ).speed).toBeGreaterThanOrEqual(0);
     expect(session.sideAgreements?.size).toBe(1);
     const firstBias = first.laneProgram.bias;
     const secondBias = second.laneProgram.bias;
@@ -482,92 +514,7 @@ describe('lane program authority', () => {
     expect(session.sideAgreements?.size).toBe(0);
   });
 
-  test('switches prediction source while keeping measured classes source-local', () => {
-    const value = activeEntry('TRUST');
-    const session = {
-      ...laneSession(),
-      t: 1,
-      entries: [value]
-    } as Session;
-    evaluateLaneProgram(session, value);
-    publishAllClaims(session);
-    const publishedScale =
-      session.racecraftClaims!.get(value.code)!
-        .lateralTrackingErrorThresholdMetres;
-    expect(session.racecraftClaims!.get(value.code)!.source).toBe('published');
-
-    value.car!.slipR = 0.4;
-    session.t += TRAF_DT;
-    publishAllClaims(session);
-    const controlled = session.racecraftClaims!.get(value.code)!;
-    expect(controlled.trusted).toBe(false);
-    expect(controlled.source).toBe('rederived');
-    expect(controlled.lateralTrackingErrorThresholdMetres)
-      .toBeGreaterThanOrEqual(0);
-
-    value.car!.slipR = 0;
-    value.latNow += 0.35;
-    session.t += TRAF_DT;
-    publishAllClaims(session);
-    const rederived = session.racecraftClaims!.get(value.code)!;
-    expect(rederived.trusted).toBe(false);
-    expect(rederived.source).toBe('rederived');
-    expect(rederived.lateralTrackingErrorThresholdMetres)
-      .toBeGreaterThan(controlled.lateralTrackingErrorThresholdMetres);
-
-    value.latNow -= 0.35;
-    session.t += TRAF_DT;
-    publishAllClaims(session);
-    const sameGeneration = session.racecraftClaims!.get(value.code)!;
-    expect(sameGeneration.source).toBe('rederived');
-    expect(editLaneEtaTarget(
-      session,
-      value,
-      value.lat,
-      'test:new-authority-generation',
-      true
-    )).toBe(true);
-    publishAllClaims(session);
-    const recovered = session.racecraftClaims!.get(value.code)!;
-    expect(recovered.source).toBe('published');
-    expect(recovered.lateralTrackingErrorThresholdMetres)
-      .toBeGreaterThanOrEqual(publishedScale);
-    value.liftT = 0.5;
-    publishAllClaims(session);
-    expect(session.racecraftClaims!.get(value.code)!.trusted).toBe(true);
-    value.recT = 0.5;
-    publishAllClaims(session);
-    expect(session.racecraftClaims!.get(value.code)!.source)
-      .toBe('published');
-
-    value.recT = 0;
-    value.car!.offCourse = true;
-    delete value.laneProgram.surfaceAuthorization;
-    session.t += TRAF_DT;
-    publishAllClaims(session);
-    expect(session.racecraftClaims!.get(value.code)!.source)
-      .toBe('rederived');
-    value.laneProgram.surfaceAuthorization = 'emergency';
-    publishAllClaims(session);
-    expect(session.racecraftClaims!.get(value.code)!.source)
-      .toBe('rederived');
-    setLaneProgram(
-      built.tr,
-      value,
-      'test:published-emergency',
-      [{
-        s: value.prog + PHYS.carLen,
-        eta: value.lat
-      }],
-      'test:published-emergency',
-      'emergency'
-    );
-    publishAllClaims(session);
-    expect(session.racecraftClaims!.get(value.code)!.source)
-      .toBe('published');
-  });
-
-  test('publishes the installed backward-composed lane speed law as one rollout', () => {
+  test('publishes the installed continuous speed law as one rollout', () => {
     const constrained = activeEntry('CONSTRAINED', 300, 0);
     const session = {
       ...laneSession(),
@@ -580,13 +527,20 @@ describe('lane program authority', () => {
       speed => speed
     );
     publishAllClaims(session);
-    const freeSpeed =
-      session.racecraftClaims!.get(constrained.code)!.stations.v[0]!;
+    const freeClaim =
+      session.racecraftClaims!.get(constrained.code)!;
+    const freeSpeed = racecraftClaimStateAtTime(
+      built.tr,
+      freeClaim,
+      racecraftClaimSegmentEndTime(freeClaim, 0)
+    ).speed;
 
     constrained.racecraftLongitudinalProgram = {
-      progress: freeProgramSpeed.map((_, slot) =>
-        constrained.prog + slot * built.tr.step),
-      speed: freeProgramSpeed.map(speed => speed * 0.7),
+      envelope: speedEnvelopeFromSamples(
+        freeProgramSpeed.map((_, slot) =>
+          constrained.prog + slot * built.tr.step),
+        freeProgramSpeed.map(speed => speed * 0.7)
+      ),
       brakingEffort: constrained.brakingEffort,
       slowPointOwnerCode: 'LEADER',
       bindingSlowPoint: {
@@ -598,30 +552,34 @@ describe('lane program authority', () => {
         publishedAt: session.t
       }
     };
-    delete constrained._laneBufferRevision;
-    const composed = evaluateLaneProgram(session, constrained);
-    expect(composed.v[0]).toBeLessThan(constrained.spd);
+    expect(speedEnvelopeAt(
+      constrained.racecraftLongitudinalProgram.envelope,
+      constrained.prog
+    )).toBeLessThan(constrained.spd);
     session.t += TRAF_DT;
     publishAllClaims(session);
     const constrainedClaim =
       session.racecraftClaims!.get(constrained.code)!;
-    expect(constrainedClaim.stations.v[0])
-      .toBeLessThan(freeSpeed);
-    expect(constrainedClaim.stations.v[0])
-      .toBeLessThan(constrained.spd);
+    const dt = racecraftClaimSegmentEndTime(constrainedClaim, 0);
+    const firstState = racecraftClaimStateAtTime(
+      built.tr,
+      constrainedClaim,
+      dt
+    );
+    expect(firstState.speed).toBeLessThan(freeSpeed);
+    expect(firstState.speed).toBeLessThan(constrained.spd);
 
-    const dt = constrainedClaim.stations.time[0]!;
     const expectedAdvance = (
-      constrained.spd + constrainedClaim.stations.v[0]!
+      constrained.spd + firstState.speed
     ) * 0.5 * dt;
     const actualAdvance = (
-      constrainedClaim.stations.s[0]! - constrainedClaim.originS +
+      firstState.s - constrainedClaim.originS +
       built.tr.len
     ) % built.tr.len;
     expect(actualAdvance).toBeCloseTo(expectedAdvance, 11);
   });
 
-  test('retains a future selected-program constraint when slot zero is free', () => {
+  test('retains a future continuous constraint when the origin is free', () => {
     const index = straightIndex();
     const entry = activeEntry('FUTURE-PROGRAM', index, 0);
     const session = laneSession();
@@ -635,18 +593,23 @@ describe('lane program authority', () => {
       speed[targetSlot]!
     );
     entry.racecraftLongitudinalProgram = {
-      progress: speed.map((_, slot) => entry.prog + slot * built.tr.step),
-      speed,
+      envelope: speedEnvelopeFromSamples(
+        speed.map((_, slot) => entry.prog + slot * built.tr.step),
+        speed
+      ),
       brakingEffort: entry.brakingEffort,
       slowPointOwnerCode: 'LEADER',
       bindingSlowPoint: null
     };
-    delete entry._laneBufferRevision;
-
-    const installed = evaluateLaneProgram(session, entry);
-
-    expect(installed.v[targetSlot]).toBeLessThan(freeTarget);
-    expect(installed.v[targetSlot]).toBeCloseTo(speed[targetSlot]!, 10);
+    const targetProgress = entry.prog + targetSlot * built.tr.step;
+    expect(speedEnvelopeAt(
+      entry.racecraftLongitudinalProgram.envelope,
+      targetProgress
+    )).toBeLessThan(freeTarget);
+    expect(speedEnvelopeAt(
+      entry.racecraftLongitudinalProgram.envelope,
+      targetProgress
+    )).toBeCloseTo(speed[targetSlot]!, 10);
   });
 
   test('composes a traffic station into the lane and leaves BotParameters traffic-free', () => {
@@ -700,7 +663,7 @@ describe('lane program authority', () => {
       'traffic' extends keyof BotParameters ? false : true;
     const trafficIsAbsent: TrafficIsAbsent = true;
     expect(trafficIsAbsent).toBe(true);
-    const legacyRuntimeObject = {
+    const extraneousRuntimeObject = {
       ...common,
       traffic: { distance: 0, speed: freeEntry.spd - 1 }
     };
@@ -708,7 +671,7 @@ describe('lane program authority', () => {
       built.tr,
       built.prof,
       freeEntry.car!,
-      legacyRuntimeObject
+      extraneousRuntimeObject
     )).toEqual(unconstrained);
   });
 

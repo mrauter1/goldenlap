@@ -135,19 +135,12 @@ describe('battle economics', () => {
   test('requires measured battle losses and sums them without a fallback', () => {
     expect(battleSpendSeconds({
       measuredAttemptLossSeconds: 0.42,
-      contestSeconds: 0.18,
       measuredProximitySeconds: 0.07
-    })).toBeCloseTo(0.67, 14);
+    })).toBeCloseTo(0.49, 14);
     expect(() => battleSpendSeconds({
       measuredAttemptLossSeconds: -0.01,
-      contestSeconds: 0,
       measuredProximitySeconds: 0
     })).toThrow();
-    expect(battleSpendSeconds({
-      measuredAttemptLossSeconds: 0.42,
-      contestSeconds: -0.12,
-      measuredProximitySeconds: 0
-    })).toBeCloseTo(0.3, 14);
   });
 
   test('rejects invalid pace and opportunity evidence', () => {

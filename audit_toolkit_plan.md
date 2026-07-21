@@ -90,16 +90,19 @@ minute**.
 ## 3. Instrumentation before scripts
 
 The cheapest audit is a counter that already exists when any sim runs. The
-plans' criteria need these bounded session counters (same pattern as
-`attackCancellations`; O(1) per tick, no logs):
+plans' criteria need these bounded session counters (O(1) per tick, no logs):
 
 - `brakeWhileAlongsideN` — brake input > 0.2 while `alongside()` and own
   pace ≥ leader's (I.5 regression canary; must be ~0).
 - `rearLossStraightN` — `slipR > slipPeakR` while `alongside` and upcoming
   curvature < 1/230 (K.3; must be 0).
-- `defenseMoveInBrakingN` / `defenseMirrorN` — J.3 rule violations
-  *attempted* (should convert to holds, so violations executed must be 0).
-- `switchbackN`, `stalkingSeconds`, per-corner pass/attempt counts (J).
+- `racecraftDefensiveMovesCommitted`, `racecraftDefensiveMovesContinued`, and
+  `racecraftDefensiveMovesResetAtExit` — immutable one-move lineage (J).
+- `racecraftDefensiveCandidateRejections` plus room-protected/closure and
+  bounded notice/alongside diagnostics — pre-braking, notice, and conditional
+  racing-room legality (J).
+- `switchbackN`, blocked-train duration, and per-corner pass/attempt counts
+  (J).
 - `battleLapDeltaSum` — accumulated (battling lap time − recent clean lap)
   for cars in `battle` (I acceptance without a second run).
 

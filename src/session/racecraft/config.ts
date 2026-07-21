@@ -15,6 +15,8 @@ export interface RacecraftCalibration {
   towDragReduction: number;
   dirtyAirMarginPenalty: number;
   mistakeUtilizationRate: number;
+  nearRubClearanceMetres: number;
+  defensiveBlockNoticeSeconds: number;
 }
 
 export interface RacecraftCalibrationDefinition {
@@ -47,7 +49,9 @@ export const RACECRAFT_CALIBRATION_DEFAULTS: Readonly<RacecraftCalibration> = Ob
   wakeSpreadRate: 0.04,
   towDragReduction: 0.18,
   dirtyAirMarginPenalty: 0.001,
-  mistakeUtilizationRate: 0.01
+  mistakeUtilizationRate: 0.01,
+  nearRubClearanceMetres: 0.15,
+  defensiveBlockNoticeSeconds: 1
 });
 
 export const RACECRAFT_RESOLUTION_DEFAULTS:
@@ -101,6 +105,16 @@ readonly RacecraftCalibrationDefinition[] = Object.freeze([
     key: 'mistakeUtilizationRate', unit: '1/s', minimum: 0.0025, maximum: 0.04,
     rationale: 'Per-second mistake hazard at full grip utilization, minimum focus, and dry conditions.',
     owner: 'driver utilization clock'
+  },
+  {
+    key: 'nearRubClearanceMetres', unit: 'm', minimum: 0.05, maximum: 0.3,
+    rationale: 'Soft body-edge daylight band for planned alongside exposure; hard legality remains exact physical width.',
+    owner: 'sporting near-rub preference'
+  },
+  {
+    key: 'defensiveBlockNoticeSeconds', unit: 's', minimum: 0.5, maximum: 2,
+    rationale: 'Minimum physically observable notice before a defender may close an optional approach side.',
+    owner: 'sporting defensive-block safety'
   },
 ]);
 

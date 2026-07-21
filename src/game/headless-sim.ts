@@ -1,5 +1,9 @@
 import { botStep, PATH_FOLLOWER_SETTLE_DISTANCE } from '../core/autopilot';
 import { makeLap, raceTick } from '../core/lap';
+import {
+  compactLateralGeometryAtProgress,
+  sampleCompactLateralProgram
+} from '../core/lateral-program';
 import type {
   BuiltTrack, Car, CarModifiers, Corner, PathFollowerTuning, SampledPath, SurfaceState, Track,
   TrackDefinition
@@ -17,15 +21,15 @@ import {
 } from '../core/surface';
 import { sampleCornerLineEta } from '../core/corner-lines';
 import { derivePathGeometry, nextCorner } from '../core/racing-line';
+import { speedEnvelopeAt } from '../core/speed-envelope';
 import { TEAM_DEFS } from '../data/teams';
 import { PIT_TEAMS, TRACK_DEFS } from '../data/tracks';
 import { createEntry, spawnOnTrack } from '../session/entry';
 import type {
   Entry, LineupEntry, QualifyingLapPhase, QualifyingSession, RaceSession,
   RacecraftDecisionLogEntry, Session, SessionConfig, SessionEvent, TyreCompound,
-  RacecraftDecisionCertificateBreakReason, RacecraftEvaluatorWorkDiagnostics,
+  RacecraftEvaluatorWorkDiagnostics,
   RacecraftInteractionCause, PathPlan, RacecraftCandidateEvaluation,
-  RacecraftClaimRevisionReason
 } from '../session/model';
 import {
   ATTACK_COMPLETION_WINDOW_SECONDS,
@@ -38,7 +42,7 @@ import { RACECRAFT_DECISION_INTERVAL_SECONDS } from '../session/racecraft/cadenc
 import { racecraftCalibration } from '../session/racecraft/config';
 import {
   orderedRacecraftDecisionLog,
-  snapshotContestedRegion
+  publishedTrajectoriesContestedRegion
 } from '../session/racecraft/evaluator';
 import {
   clearLaneProgram,
@@ -53,6 +57,8 @@ import {
   obligationsFor,
   owes
 } from '../session/racecraft/relations';
+import { resolvePredictiveSafetyIntervalTicks } from
+  '../session/racecraft/reactive-safety';
 import { stepSession } from '../session/session';
 import {
   entryDownforceScale,
@@ -136,6 +142,7 @@ export interface FocusedSessionOptions extends Partial<SimulationLimits> {
   settlingSeconds?: number;
   stopWhenDecided?: boolean;
   defenseVariant?: 'anticipatory' | 'committed';
+  predictiveSafetyHz?: 10 | 30;
 }
 
 export interface HeadlessRaceOptions extends Partial<SimulationLimits> {
@@ -152,6 +159,7 @@ export interface HeadlessRaceOptions extends Partial<SimulationLimits> {
   forcedStrategies?: readonly ForcedHeadlessStrategy[];
   /** Tier-2 audit view; keeps the compressed opening lap out of steady-state rates. */
   includeLapStrata?: boolean;
+  predictiveSafetyHz?: 10 | 30;
 }
 
 export interface ForcedHeadlessStrategy {
@@ -194,7 +202,6 @@ export interface RacecraftSelectedJDecomposition {
   /** Arithmetic means over retained selected records, all in seconds. */
   ownTimeSeconds: number;
   billSeconds: number;
-  recourseSeconds: number;
   proximitySeconds: number;
   positionValueSeconds: number;
   attemptLossSeconds: number;
@@ -224,11 +231,17 @@ export interface FocusedSessionSummary extends HeadlessStop {
     racecraftCornerDecisions:
       Record<string, { inline: number; offset: number }>;
     racecraftSelectedJ: RacecraftSelectedJDecomposition;
-    racecraftCertificateBreaks:
-      Partial<Record<RacecraftDecisionCertificateBreakReason, number>>;
-    racecraftClaimRevisionReasons:
-      Partial<Record<RacecraftClaimRevisionReason, number>>;
     racecraftEvaluatorWork: Partial<RacecraftEvaluatorWorkDiagnostics>;
+    racecraftDeliberationsByCar: Record<string, number>;
+    racecraftPublicationsByCar: Record<string, number>;
+    racecraftDirectDecisionProofs: Record<string, number>;
+    racecraftOwnershipInvalidationsByReason: Record<string, number>;
+    racecraftDefensiveCandidateRejections: Record<string, number>;
+    racecraftDefensiveMinimumNoticeSecondsByOutcome:
+      Record<string, number>;
+    racecraftDefensiveMinimumAlongsideSecondsByOutcome:
+      Record<string, number>;
+    racecraftSafetyPredicateRuns: Record<string, number>;
   };
   metrics: Record<string, number>;
   audit?: {
@@ -303,13 +316,10 @@ export interface HeadlessRaceSummary extends HeadlessStop {
     sideBySideEpisodes: number;
     sideBySideContactEpisodes: number;
     sideBySideDurations: number[];
-    repeatedDefenses: number;
     switchbacks: number;
     switchbackCompletions: number;
     brakeWhileAlongside: number;
     rearLossStraight: number;
-    defenseMoveInBraking: number;
-    defenseMirror: number;
     battleLapDelta: number;
     battleLapLossFraction: number;
     battleLapSamples: number;
@@ -331,12 +341,40 @@ export interface HeadlessRaceSummary extends HeadlessStop {
     candidatesEvaluated: number;
     pathsMaterialized: number;
     racecraftDecisionSwitches: number;
-    racecraftTier0Checks: number;
-    racecraftTier0Accepted: number;
-    racecraftTier0IdealDominance: number;
-    racecraftTier0AcceptanceFraction: number;
-    racecraftTier1Deliberations: number;
-    racecraftUntrustedClaimSamples: number;
+    racecraftDeliberations: number;
+    racecraftTacticalPublications: number;
+    racecraftOffSlotPublicationAttempts: number;
+    racecraftSameSlotReopenings: number;
+    racecraftNestedResponseEvaluations: number;
+    racecraftDirectIdealDecisions: number;
+    racecraftDirectFollowDecisions: number;
+    racecraftDirectFollowWithoutCertificates: number;
+    racecraftStagedCandidatesOpened: number;
+    racecraftStagedCandidatesRejected: number;
+    racecraftStagedCandidatesSelected: number;
+    racecraftStagedCandidatesCleared: number;
+    racecraftStagedAcquisitionConstrainedSeconds: number;
+    racecraftCommittedAttackViews: number;
+    racecraftDefensiveResponses: number;
+    racecraftDefensiveMovesCommitted: number;
+    racecraftDefensiveMovesContinued: number;
+    racecraftDefensiveMovesResetAtExit: number;
+    racecraftDefensiveRoomProtectedCovers: number;
+    racecraftDefensiveAuthorizedSideClosures: number;
+    racecraftDefensiveAuthorizedApproachConflicts: number;
+    racecraftDefensivePreConsumptionSafetyInterventions: number;
+    racecraftSwitchbackFamilyChanges: number;
+    racecraftOwnershipAssertions: number;
+    racecraftOwnershipCurrentValidations: number;
+    racecraftOwnershipInvalidations: number;
+    racecraftDefenderReclaims: number;
+    racecraftMaximumSingleFileTrainLength: number;
+    racecraftLongestSingleFileTrainSeconds: number;
+    racecraftFasterCarBlockedSeconds: number;
+    predictiveSafetyHz: 10 | 30;
+    predictiveSafetyIntervalTicks: 1 | 3;
+    racecraftSafetyPasses: number;
+    racecraftSafetyInterventions: number;
     racecraftInteractionSamples: number;
     racecraftLiftSamplesOutsideBlue: number;
     racecraftBlueLiftSamples: number;
@@ -362,11 +400,17 @@ export interface HeadlessRaceSummary extends HeadlessStop {
     racecraftCornerDecisions:
       Record<string, { inline: number; offset: number }>;
     racecraftSelectedJ: RacecraftSelectedJDecomposition;
-    racecraftCertificateBreaks:
-      Partial<Record<RacecraftDecisionCertificateBreakReason, number>>;
-    racecraftClaimRevisionReasons:
-      Partial<Record<RacecraftClaimRevisionReason, number>>;
     racecraftEvaluatorWork: Partial<RacecraftEvaluatorWorkDiagnostics>;
+    racecraftDeliberationsByCar: Record<string, number>;
+    racecraftPublicationsByCar: Record<string, number>;
+    racecraftDirectDecisionProofs: Record<string, number>;
+    racecraftOwnershipInvalidationsByReason: Record<string, number>;
+    racecraftDefensiveCandidateRejections: Record<string, number>;
+    racecraftDefensiveMinimumNoticeSecondsByOutcome:
+      Record<string, number>;
+    racecraftDefensiveMinimumAlongsideSecondsByOutcome:
+      Record<string, number>;
+    racecraftSafetyPredicateRuns: Record<string, number>;
     pitDeadlocks: Array<{
       code: string;
       time: number;
@@ -490,8 +534,17 @@ const DEFAULT_CONFIG: SessionConfig = {
   pitSkill: 3,
   pitFocus: 3,
   tuneBonus: 0,
-  tuningPoints: 0
+  tuningPoints: 0,
+  predictiveSafetyHz: 10
 };
+
+function headlessSessionConfig(
+  predictiveSafetyHz: 10 | 30
+): SessionConfig {
+  return predictiveSafetyHz === DEFAULT_CONFIG.predictiveSafetyHz
+    ? DEFAULT_CONFIG
+    : { ...DEFAULT_CONFIG, predictiveSafetyHz };
+}
 
 function round(value: number): number {
   return Number.isFinite(value) ? Math.round(value * 1e9) / 1e9 : value;
@@ -785,13 +838,19 @@ function focusedEntries(count: number): Entry[] {
   }));
 }
 
-function createFocusedRace(built: BuiltTrack, wet: number, count = 2): RaceSession {
+function createFocusedRace(
+  built: BuiltTrack,
+  wet: number,
+  count = 2,
+  predictiveSafetyHz: 10 | 30 = 10
+): RaceSession {
   const entries = focusedEntries(count);
+  const config = headlessSessionConfig(predictiveSafetyHz);
   return {
     mode: 'race',
     trk: built.tr,
     prof: built.prof,
-    config: DEFAULT_CONFIG,
+    config,
     events: [],
     entries,
     t: 20,
@@ -810,6 +869,8 @@ function createFocusedRace(built: BuiltTrack, wet: number, count = 2): RaceSessi
     endT: 0,
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks:
+      resolvePredictiveSafetyIntervalTicks(config.predictiveSafetyHz),
     camI: -1,
     raining: false,
     rainAt: -1,
@@ -820,13 +881,15 @@ function createFocusedRace(built: BuiltTrack, wet: number, count = 2): RaceSessi
 function createFocusedQualifying(
   built: BuiltTrack,
   wet: number,
-  count = 2
+  count = 2,
+  predictiveSafetyHz: 10 | 30 = 10
 ): QualifyingSession {
+  const config = headlessSessionConfig(predictiveSafetyHz);
   return {
     mode: 'quali',
     trk: built.tr,
     prof: built.prof,
-    config: DEFAULT_CONFIG,
+    config,
     events: [],
     entries: focusedEntries(count),
     t: 20,
@@ -840,6 +903,8 @@ function createFocusedQualifying(
     over: false,
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks:
+      resolvePredictiveSafetyIntervalTicks(config.predictiveSafetyHz),
     goT: 0,
     camI: -1,
     mile: {}
@@ -891,7 +956,8 @@ function createHeadlessRace(
   built: BuiltTrack,
   laps: number,
   wet: number,
-  gridSize: number
+  gridSize: number,
+  predictiveSafetyHz: 10 | 30
 ): RaceSession {
   const lineup = performanceRaceLineup(gridSize);
   // A bounded deterministic grid perturbation prevents the season sample from
@@ -899,11 +965,12 @@ function createHeadlessRace(
   const gridScore = lineup.map(entry => entry.margin + (random() - 0.5) * 0.018);
   const grid = lineup.map((_entry, index) => index)
     .sort((left, right) => gridScore[right]! - gridScore[left]! || left - right);
+  const config = headlessSessionConfig(predictiveSafetyHz);
   const session: RaceSession = {
     mode: 'race',
     trk: built.tr,
     prof: built.prof,
-    config: DEFAULT_CONFIG,
+    config,
     events: [],
     entries: lineup.map((item, index) => createEntry({
       lineup: item,
@@ -926,6 +993,8 @@ function createHeadlessRace(
     endT: 0,
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks:
+      resolvePredictiveSafetyIntervalTicks(config.predictiveSafetyHz),
     camI: -1,
     raining: wet > 0,
     rainAt: wet > 0 ? 0 : -1,
@@ -1091,10 +1160,36 @@ function selectedJDecomposition(
   session: Session,
   log: readonly RacecraftDecisionLogEntry[]
 ): RacecraftSelectedJDecomposition {
+  if (!session.racecraftDecisionLogging) {
+    const value = session.racecraftSelectedJAccumulator;
+    const samples = value?.samples ?? 0;
+    const divisor = Math.max(1, samples);
+    return {
+      samples,
+      droppedSamples: 0,
+      ownTimeSeconds: round((value?.ownTimeSeconds ?? 0) / divisor),
+      billSeconds: round((value?.billSeconds ?? 0) / divisor),
+      proximitySeconds: round((value?.proximitySeconds ?? 0) / divisor),
+      positionValueSeconds: round(
+        (value?.positionValueSeconds ?? 0) / divisor
+      ),
+      attemptLossSeconds: round(
+        (value?.attemptLossSeconds ?? 0) / divisor
+      ),
+      battleSpendSeconds: round(
+        (value?.battleSpendSeconds ?? 0) / divisor
+      ),
+      effortRiskSeconds: round(
+        (value?.effortRiskSeconds ?? 0) / divisor
+      ),
+      tieBandSeconds: round((value?.tieBandSeconds ?? 0) / divisor),
+      totalSeconds: round((value?.totalSeconds ?? 0) / divisor),
+      hazardCount: round((value?.hazardCount ?? 0) / divisor)
+    };
+  }
   let samples = 0;
   let ownTimeSeconds = 0;
   let billSeconds = 0;
-  let recourseSeconds = 0;
   let proximitySeconds = 0;
   let positionValueSeconds = 0;
   let attemptLossSeconds = 0;
@@ -1112,7 +1207,6 @@ function selectedJDecomposition(
     if (!selected || ![
       selected.ownTimeSeconds,
       selected.billSeconds,
-      selected.recourseSeconds,
       selected.proximitySeconds,
       selected.positionValueSeconds,
       selected.attemptLossSeconds,
@@ -1124,7 +1218,6 @@ function selectedJDecomposition(
     samples++;
     ownTimeSeconds += selected.ownTimeSeconds;
     billSeconds += selected.billSeconds;
-    recourseSeconds += selected.recourseSeconds;
     proximitySeconds += selected.proximitySeconds;
     positionValueSeconds += selected.positionValueSeconds;
     attemptLossSeconds += selected.attemptLossSeconds;
@@ -1140,7 +1233,6 @@ function selectedJDecomposition(
     droppedSamples: session.racecraftDecisionLogDropped ?? 0,
     ownTimeSeconds: round(ownTimeSeconds / divisor),
     billSeconds: round(billSeconds / divisor),
-    recourseSeconds: round(recourseSeconds / divisor),
     proximitySeconds: round(proximitySeconds / divisor),
     positionValueSeconds: round(positionValueSeconds / divisor),
     attemptLossSeconds: round(attemptLossSeconds / divisor),
@@ -1234,8 +1326,15 @@ export function runHeadlessRace(
     ...(options.now === undefined ? {} : { now: options.now })
   });
   return withRandomSource(mulberry32(seed), () => {
-    const session = createHeadlessRace(built, laps, wet, gridSize);
-    session.racecraftDecisionLogging = true;
+    const session = createHeadlessRace(
+      built,
+      laps,
+      wet,
+      gridSize,
+      options.predictiveSafetyHz ?? 10
+    );
+    session.racecraftDecisionLogging =
+      options.includeRacecraftDecisionLog === true;
     const forcedStrategies = options.forcedStrategies ?? [];
     initializeForcedStrategies(session, forcedStrategies);
     let steps = 0;
@@ -1562,13 +1661,10 @@ export function runHeadlessRace(
         sideBySideEpisodes: episodes.length,
         sideBySideContactEpisodes: episodes.filter(episode => episode.contact).length,
         sideBySideDurations: episodes.map(episode => round(episode.t)),
-        repeatedDefenses: session.defRepeatN ?? 0,
         switchbacks: session.switchbackN ?? 0,
         switchbackCompletions: session.switchbackCompletions ?? 0,
         brakeWhileAlongside: session.brakeWhileAlongsideN ?? 0,
         rearLossStraight: session.rearLossStraightN ?? 0,
-        defenseMoveInBraking: session.defenseMoveInBrakingN ?? 0,
-        defenseMirror: session.defenseMirrorN ?? 0,
         battleLapDelta: round(session.battleLapDeltaSum ?? 0),
         battleLapLossFraction: round(
           (session.battleLapDeltaSum ?? 0) /
@@ -1613,18 +1709,74 @@ export function runHeadlessRace(
         candidatesEvaluated: session.racecraftCandidatesEvaluated ?? 0,
         pathsMaterialized: session.racecraftPathsMaterialized ?? 0,
         racecraftDecisionSwitches: session.racecraftDecisionSwitches ?? 0,
-        racecraftTier0Checks: session.racecraftTier0Checks ?? 0,
-        racecraftTier0Accepted: session.racecraftTier0Accepted ?? 0,
-        racecraftTier0IdealDominance:
-          session.racecraftTier0IdealDominance ?? 0,
-        racecraftTier0AcceptanceFraction: round(
-          (session.racecraftTier0Accepted ?? 0) /
-            Math.max(1, session.racecraftTier0Checks ?? 0)
+        racecraftDeliberations: session.racecraftDeliberations ?? 0,
+        racecraftTacticalPublications:
+          session.racecraftTacticalPublications ?? 0,
+        racecraftOffSlotPublicationAttempts:
+          session.racecraftOffSlotPublicationAttempts ?? 0,
+        racecraftSameSlotReopenings:
+          session.racecraftSameSlotReopenings ?? 0,
+        racecraftNestedResponseEvaluations:
+          session.racecraftNestedResponseEvaluations ?? 0,
+        racecraftDirectIdealDecisions:
+          session.racecraftDirectIdealDecisions ?? 0,
+        racecraftDirectFollowDecisions:
+          session.racecraftDirectFollowDecisions ?? 0,
+        racecraftDirectFollowWithoutCertificates:
+          session.racecraftDirectFollowWithoutCertificates ?? 0,
+        racecraftStagedCandidatesOpened:
+          session.racecraftStagedCandidatesOpened ?? 0,
+        racecraftStagedCandidatesRejected:
+          session.racecraftStagedCandidatesRejected ?? 0,
+        racecraftStagedCandidatesSelected:
+          session.racecraftStagedCandidatesSelected ?? 0,
+        racecraftStagedCandidatesCleared:
+          session.racecraftStagedCandidatesCleared ?? 0,
+        racecraftStagedAcquisitionConstrainedSeconds: round(
+          session.racecraftStagedAcquisitionConstrainedSeconds ?? 0
         ),
-        racecraftTier1Deliberations:
-          session.racecraftTier1Deliberations ?? 0,
-        racecraftUntrustedClaimSamples:
-          session.racecraftClaimUntrustedSamples ?? 0,
+        racecraftCommittedAttackViews:
+          session.racecraftCommittedAttackViews ?? 0,
+        racecraftDefensiveResponses:
+          session.racecraftDefensiveResponses ?? 0,
+        racecraftDefensiveMovesCommitted:
+          session.racecraftDefensiveMovesCommitted ?? 0,
+        racecraftDefensiveMovesContinued:
+          session.racecraftDefensiveMovesContinued ?? 0,
+        racecraftDefensiveMovesResetAtExit:
+          session.racecraftDefensiveMovesResetAtExit ?? 0,
+        racecraftDefensiveRoomProtectedCovers:
+          session.racecraftDefensiveRoomProtectedCovers ?? 0,
+        racecraftDefensiveAuthorizedSideClosures:
+          session.racecraftDefensiveAuthorizedSideClosures ?? 0,
+        racecraftDefensiveAuthorizedApproachConflicts:
+          session.racecraftDefensiveAuthorizedApproachConflicts ?? 0,
+        racecraftDefensivePreConsumptionSafetyInterventions:
+          session.racecraftDefensivePreConsumptionSafetyInterventions ?? 0,
+        racecraftSwitchbackFamilyChanges:
+          session.racecraftSwitchbackFamilyChanges ?? 0,
+        racecraftOwnershipAssertions:
+          session.racecraftOwnershipAssertions ?? 0,
+        racecraftOwnershipCurrentValidations:
+          session.racecraftOwnershipCurrentValidations ?? 0,
+        racecraftOwnershipInvalidations:
+          session.racecraftOwnershipInvalidations ?? 0,
+        racecraftDefenderReclaims:
+          session.racecraftDefenderReclaims ?? 0,
+        racecraftMaximumSingleFileTrainLength:
+          session.racecraftMaximumSingleFileTrainLength ?? 0,
+        racecraftLongestSingleFileTrainSeconds: round(
+          session.racecraftLongestSingleFileTrainSeconds ?? 0
+        ),
+        racecraftFasterCarBlockedSeconds: round(
+          session.racecraftFasterCarBlockedSeconds ?? 0
+        ),
+        predictiveSafetyHz: session.config.predictiveSafetyHz,
+        predictiveSafetyIntervalTicks:
+          session.racecraftPredictiveSafetyIntervalTicks,
+        racecraftSafetyPasses: session.racecraftSafetyPasses ?? 0,
+        racecraftSafetyInterventions:
+          session.racecraftSafetyInterventions ?? 0,
         racecraftInteractionSamples: Object.values(
           session.racecraftInteractionSamples ?? {}
         ).reduce((sum, count) => sum + (count ?? 0), 0),
@@ -1673,16 +1825,48 @@ export function runHeadlessRace(
             .map(([cornerId, count]) => [cornerId, { ...count }])
         ),
         racecraftSelectedJ: selectedJ,
-        racecraftCertificateBreaks: Object.fromEntries(
-          Object.entries(session.racecraftCertificateBreaks ?? {})
-            .sort(([left], [right]) => left.localeCompare(right))
-        ),
-        racecraftClaimRevisionReasons: Object.fromEntries(
-          Object.entries(session.racecraftClaimRevisionReasons ?? {})
-            .sort(([left], [right]) => left.localeCompare(right))
-        ),
         racecraftEvaluatorWork: {
           ...session.racecraftEvaluatorWork
+        },
+        racecraftDeliberationsByCar: {
+          ...session.racecraftDeliberationsByCar
+        },
+        racecraftPublicationsByCar: {
+          ...session.racecraftPublicationsByCar
+        },
+        racecraftDirectDecisionProofs: {
+          ...session.racecraftDirectDecisionProofs
+        },
+        racecraftOwnershipInvalidationsByReason: {
+          ...session.racecraftOwnershipInvalidationsByReason
+        },
+        racecraftDefensiveCandidateRejections: {
+          ...session.racecraftDefensiveCandidateRejections
+        },
+        racecraftDefensiveMinimumNoticeSecondsByOutcome:
+          Object.fromEntries(
+            Object.entries(
+              session
+                .racecraftDefensiveMinimumNoticeSecondsByOutcome ??
+                {}
+            ).map(([outcome, seconds]) => [
+              outcome,
+              round(seconds)
+            ])
+          ),
+        racecraftDefensiveMinimumAlongsideSecondsByOutcome:
+          Object.fromEntries(
+            Object.entries(
+              session
+                .racecraftDefensiveMinimumAlongsideSecondsByOutcome ??
+                {}
+            ).map(([outcome, seconds]) => [
+              outcome,
+              round(seconds)
+            ])
+          ),
+        racecraftSafetyPredicateRuns: {
+          ...session.racecraftSafetyPredicateRuns
         },
         pitDeadlocks: (session.pitDeadlocks ?? []).map(record => ({
           ...record,
@@ -2233,18 +2417,13 @@ function setupFocusedScenario(session: Session, options: FocusedSessionOptions):
       (inside ? corner.side : -corner.side) * PHYS.carWid,
       duration
     );
-    if (inside) {
-      // The inside-dive case isolates the attack line; defense legality has
-      // its own canaries and must not turn this probe into a switchback.
-      second._defSeenAttackers = { [first.code]: true };
-    } else {
-      second._defendingAgainst = first.code;
-    }
     return;
   }
   if (scenario === 'attack-launch') {
-    first.lu.margin = second.lu.margin = 0.955;
-    first.mods.hMu = second.mods.hMu = 1;
+    first.lu.margin = 0.968;
+    second.lu.margin = 0.94;
+    first.mods.hMu = options.attackerGripScale ?? 1.045;
+    second.mods.hMu = 1;
     const straight = longestStraight(session.trk);
     const corner = straight.corner;
     if (!corner.alternateLines?.inside)
@@ -2252,19 +2431,21 @@ function setupFocusedScenario(session: Session, options: FocusedSessionOptions):
     const speed = focusedSpeed(session.trk, straight.startI, 0.9);
     const attackerProgress = 2 * session.trk.len + straight.startI * session.trk.step;
     const leaderProgress = attackerProgress + PHYS.carLen * 2;
-    placeEntryAtProgress(session, first, attackerProgress, speed,
+    const referenceLapSeconds = session.trk.idealTiming?.lapTime ??
+      session.prof.lapTime;
+    // This is the faster-behind economic canary. Seed measured prior-lap
+    // evidence and a matching physical close; the evaluator must author the
+    // attack, while attackEpisodes remains an observation-only consequence.
+    first.lastLap = referenceLapSeconds / first.lu.margin;
+    second.lastLap = referenceLapSeconds / second.lu.margin;
+    placeEntryAtProgress(
+      session,
+      first,
+      attackerProgress,
+      speed + (options.closingSpeedMps ?? 3),
       idealLateralAtProgress(session, attackerProgress));
     placeEntryAtProgress(session, second, leaderProgress, speed,
       idealLateralAtProgress(session, leaderProgress));
-    seedFocusedAttack(
-      session,
-      first,
-      second,
-      corner,
-      corner.side * PHYS.carWid,
-      options.simulatedSeconds ?? 15
-    );
-    second._defSeenAttackers = { [first.code]: true };
     return;
   }
   if (scenario === 'switchback' || scenario === 'over-under') {
@@ -2302,7 +2483,7 @@ function setupFocusedScenario(session: Session, options: FocusedSessionOptions):
     const leaderProgress = attackerProgress + PHYS.carLen +
       (scenario === 'over-under'
         ? options.initialGapM ?? PHYS.carLen * 2
-        : 0);
+        : speed * RACECRAFT_DECISION_INTERVAL_SECONDS);
     if (scenario === 'over-under') {
       first.lu.margin = 0.968;
       second.lu.margin = 0.95;
@@ -2318,7 +2499,6 @@ function setupFocusedScenario(session: Session, options: FocusedSessionOptions):
         session.trk.step;
     const duration = (completionProgress - attackerProgress) / speed +
       RACECRAFT_DECISION_INTERVAL_SECONDS;
-    second._defendingAgainst = first.code;
     seedFocusedAttack(session, first, second, corner, corner.side * PHYS.carWid,
       options.simulatedSeconds ?? duration);
     return;
@@ -2488,6 +2668,17 @@ function minimumDynamicLaneSpeed(entries: readonly Entry[]): number {
   for (const entry of entries) {
     if (entry.path)
       for (const speed of entry.path.v) minimum = Math.min(minimum, speed);
+    const envelope = entry.racecraftLongitudinalProgram?.envelope;
+    if (envelope)
+      for (let index = 0; index < envelope.segmentCount; index++) {
+        const start = envelope.segmentStartProgress[index]!;
+        const end = envelope.segmentEndProgress[index]!;
+        minimum = Math.min(
+          minimum,
+          speedEnvelopeAt(envelope, start),
+          speedEnvelopeAt(envelope, end)
+        );
+      }
     const lane = entry.laneBuffer;
     if (!lane || lane.uniformBias !== null) continue;
     for (let slot = 0; slot < lane.count; slot++)
@@ -2496,12 +2687,30 @@ function minimumDynamicLaneSpeed(entries: readonly Entry[]): number {
   return minimum;
 }
 
-function maximumDynamicLaneCurvature(entries: readonly Entry[]): number {
+function maximumDynamicLaneCurvature(
+  track: Track,
+  entries: readonly Entry[]
+): number {
   let maximum = 0;
   for (const entry of entries) {
     if (entry.path)
       for (const curvature of entry.path.k)
         maximum = Math.max(maximum, Math.abs(curvature));
+    const program = entry.racecraftLateralProgram;
+    if (program)
+      for (let index = 0; index < program.segmentCount; index++) {
+        const start = program.segmentStartProgress[index]!;
+        const end = program.segmentEndProgress[index]!;
+        for (const progress of [start, (start + end) / 2, end])
+          maximum = Math.max(
+            maximum,
+            Math.abs(compactLateralGeometryAtProgress(
+              track,
+              program,
+              progress
+            ).curvature)
+          );
+      }
     const lane = entry.laneBuffer;
     if (!lane || lane.uniformBias !== null) continue;
     for (let slot = 0; slot < lane.count; slot++)
@@ -2574,15 +2783,12 @@ interface FocusedAuditState {
   initialAttackCompletions: number;
   initialSwitchbacks: number;
   initialSwitchbackCompletions: number;
-  initialDefenseMoves: number;
-  initialDefenseBlocks: number;
+  initialDefensiveMovesCommitted: number;
+  initialDefensiveAuthorizedSideClosures: number;
   initialBrakeAlongside: number;
   initialRearLoss: number;
-  initialDefenseBraking: number;
-  initialDefenseMirror: number;
   targetProgress: number;
   brakeProgress: number;
-  approachProgress: number;
   expectedCornerApex: number;
   minimumBodyClearance: number;
   minimumStraightBodyClearance: number;
@@ -2682,15 +2888,12 @@ function makeFocusedAuditState(): FocusedAuditState {
     initialAttackCompletions: 0,
     initialSwitchbacks: 0,
     initialSwitchbackCompletions: 0,
-    initialDefenseMoves: 0,
-    initialDefenseBlocks: 0,
+    initialDefensiveMovesCommitted: 0,
+    initialDefensiveAuthorizedSideClosures: 0,
     initialBrakeAlongside: 0,
     initialRearLoss: 0,
-    initialDefenseBraking: 0,
-    initialDefenseMirror: 0,
     targetProgress: Infinity,
     brakeProgress: Infinity,
-    approachProgress: Infinity,
     expectedCornerApex: -1,
     minimumBodyClearance: Infinity,
     minimumStraightBodyClearance: Infinity,
@@ -2794,12 +2997,12 @@ function openFocusedAudit(
   state.initialAttackCompletions = session.attackCompletions ?? 0;
   state.initialSwitchbacks = session.switchbackN ?? 0;
   state.initialSwitchbackCompletions = session.switchbackCompletions ?? 0;
-  state.initialDefenseMoves = session.defMoveN ?? 0;
-  state.initialDefenseBlocks = session.defBlockedN ?? 0;
+  state.initialDefensiveMovesCommitted =
+    session.racecraftDefensiveMovesCommitted ?? 0;
+  state.initialDefensiveAuthorizedSideClosures =
+    session.racecraftDefensiveAuthorizedSideClosures ?? 0;
   state.initialBrakeAlongside = session.brakeWhileAlongsideN ?? 0;
   state.initialRearLoss = session.rearLossStraightN ?? 0;
-  state.initialDefenseBraking = session.defenseMoveInBrakingN ?? 0;
-  state.initialDefenseMirror = session.defenseMirrorN ?? 0;
   state.previousDefenderLateral = second.latNow;
   state.previousDefenderProgress = second.prog;
   if (options.scenario === 'tow-run' || options.scenario === 'near-touch-tow' ||
@@ -2818,7 +3021,6 @@ function openFocusedAudit(
       second,
       straight.corner.brakeI
     );
-    state.approachProgress = focusedProgressAtIndex(session, second, straight.corner.approachI);
     state.expectedCornerApex = straight.corner.apexI;
   } else if (options.scenario === 'side-by-side-corner' ||
       options.scenario === 'defense-legality') {
@@ -2879,13 +3081,17 @@ function focusedHardFailure(session: Session): string {
   return '';
 }
 
-function focusedSnapshotContest(session: Session, entry: Entry): boolean {
+function focusedPublicationContest(session: Session, entry: Entry): boolean {
   const own = session.racecraftClaims?.get(entry.code);
   if (!own) return false;
   for (const other of session.entries) {
     if (other === entry || !other.car) continue;
     const claim = session.racecraftClaims?.get(other.code);
-    if (claim && snapshotContestedRegion(session.trk, own, claim))
+    if (claim && publishedTrajectoriesContestedRegion(
+      session.trk,
+      own,
+      claim
+    ))
       return true;
   }
   return false;
@@ -2959,6 +3165,20 @@ function updateFocusedAudit(
         pullOut.signedOffsetMetres
       );
     }
+    if (options.scenario === 'near-touch-tow' &&
+        observed === first &&
+        observed.prog < state.brakeProgress &&
+        decision.candidates.some(candidate =>
+          candidate.feasible &&
+          candidate.plan.mode !== 'ideal' &&
+          candidate.plan.mode !== 'pit' &&
+          candidate.plan.surfaceAuthorization !== 'emergency' &&
+          candidate.plan.leaderCode === second.code &&
+          (candidate.kind === 'corner-inside' ||
+            candidate.kind === 'corner-outside' ||
+            straightPullOutUsage(session.trk, candidate.plan) != null)
+        ))
+      state.escapeAvailableSeen = true;
     if (selected &&
         selected.plan.mode !== 'ideal' &&
         selected.plan.mode !== 'pit' &&
@@ -2967,7 +3187,7 @@ function updateFocusedAudit(
       if (!emergencySelectionHasLiveHazardProvenance(selected))
         state.emergencySurfaceAttributionFailures++;
     }
-    if (focusedSnapshotContest(session, observed)) {
+    if (focusedPublicationContest(session, observed)) {
       if (decision.selectedKind === 'brake-behind')
         state.contestBrakeSelections++;
       else if (decision.selectedKind === 'corner-inside' ||
@@ -3016,14 +3236,9 @@ function updateFocusedAudit(
       state.endingBodyClearance = bodyClearance;
       state.derivedFollowBodyFloor =
         oneIntervalPhysicalDivergence(session, second);
-      state.leaderTrackingErrorThreshold =
-        session.racecraftClaims?.get(second.code)
-          ?.lateralTrackingErrorThresholdMetres ??
-        second.claimLateralTrackingErrorThresholdMetres ??
-        0;
     }
     if (options.scenario === 'near-touch-tow') {
-      if (second.prog < state.approachProgress)
+      if (second.prog < state.brakeProgress)
         state.minimumStraightBodyClearance = Math.min(
           state.minimumStraightBodyClearance,
           bodyClearance
@@ -3043,13 +3258,6 @@ function updateFocusedAudit(
     );
     const selected = first.racecraftDecision?.candidates.find(candidate =>
       candidate.plan.key === first.racecraftDecision?.selectedPlanKey);
-    if (options.scenario === 'near-touch-tow' &&
-        second.prog < state.approachProgress &&
-        selected?.feasible &&
-        (selected.kind === 'corner-inside' ||
-          selected.kind === 'corner-outside') &&
-        first.inp.brake <= 0.3)
-      state.escapeAvailableSeen = true;
     if (state.expectedLineKind && selected?.plan.mode !== 'ideal' &&
         selected?.plan.mode !== 'pit' &&
         selected?.plan.lineKind === state.expectedLineKind)
@@ -3108,12 +3316,24 @@ function updateFocusedAudit(
     const firstIndex = Math.max(0, first.car?.progIdx ?? 0) % session.trk.n;
     const secondIndex = Math.max(0, second.car?.progIdx ?? 0) % session.trk.n;
     const firstEta = first.latNow - session.trk.idealPath.off[firstIndex]!;
-    const leaderEta = second.laneProgram.points.length
-      ? evaluateLaneEta(second.laneProgram.points, first.prog).eta
-      : second.laneProgram.bias;
-    const firstCommandEta = first.laneProgram.points.length
-      ? evaluateLaneEta(first.laneProgram.points, first.prog).eta
-      : first.laneProgram.bias;
+    const leaderEta = second.racecraftLateralProgram
+      ? sampleCompactLateralProgram(
+          session.trk,
+          second.racecraftLateralProgram,
+          second.prog
+        ).value - session.trk.idealPath.off[secondIndex]!
+      : second.laneProgram.points.length
+        ? evaluateLaneEta(second.laneProgram.points, second.prog).eta
+        : second.laneProgram.bias;
+    const firstCommandEta = first.racecraftLateralProgram
+      ? sampleCompactLateralProgram(
+          session.trk,
+          first.racecraftLateralProgram,
+          first.prog
+        ).value - session.trk.idealPath.off[firstIndex]!
+      : first.laneProgram.points.length
+        ? evaluateLaneEta(first.laneProgram.points, first.prog).eta
+        : first.laneProgram.bias;
     state.tuckedMaximumEtaError = Math.max(
       state.tuckedMaximumEtaError,
       Math.abs(firstEta - leaderEta)
@@ -3128,25 +3348,41 @@ function updateFocusedAudit(
       state.tuckedCommandErrorProgressGap = second.prog - first.prog;
       const firstLast = first.laneProgram.points.at(-1);
       const secondLast = second.laneProgram.points.at(-1);
-      state.tuckedCommandErrorFollowerPointSpan = firstLast
-        ? firstLast.s - first.prog
-        : 0;
-      state.tuckedCommandErrorLeaderPointSpan = secondLast
-        ? secondLast.s - second.prog
-        : 0;
+      state.tuckedCommandErrorFollowerPointSpan =
+        first.racecraftLateralProgram
+          ? first.racecraftLateralProgram.endProgress - first.prog
+          : firstLast
+            ? firstLast.s - first.prog
+            : 0;
+      state.tuckedCommandErrorLeaderPointSpan =
+        second.racecraftLateralProgram
+          ? second.racecraftLateralProgram.endProgress - second.prog
+          : secondLast
+            ? secondLast.s - second.prog
+            : 0;
     }
     state.tuckedMaximumTrackingError = Math.max(
       state.tuckedMaximumTrackingError,
       Math.abs(firstEta - firstCommandEta)
     );
-    const firstLaneSpeed = first.laneBuffer?.count &&
-        first.laneBuffer.startIndex === firstIndex
-      ? first.laneBuffer.v[0]!
-      : session.trk.idealPath.v[firstIndex]!;
-    const secondLaneSpeed = second.laneBuffer?.count &&
-        second.laneBuffer.startIndex === secondIndex
-      ? second.laneBuffer.v[0]!
-      : session.trk.idealPath.v[secondIndex]!;
+    const firstLaneSpeed = first.racecraftLongitudinalProgram
+      ? speedEnvelopeAt(
+          first.racecraftLongitudinalProgram.envelope,
+          first.prog
+        )
+      : first.laneBuffer?.count &&
+          first.laneBuffer.startIndex === firstIndex
+        ? first.laneBuffer.v[0]!
+        : session.trk.idealPath.v[firstIndex]!;
+    const secondLaneSpeed = second.racecraftLongitudinalProgram
+      ? speedEnvelopeAt(
+          second.racecraftLongitudinalProgram.envelope,
+          second.prog
+        )
+      : second.laneBuffer?.count &&
+          second.laneBuffer.startIndex === secondIndex
+        ? second.laneBuffer.v[0]!
+        : session.trk.idealPath.v[secondIndex]!;
     state.tuckedFirstLaneSpeedDeficit += Math.max(
       0,
       session.trk.idealPath.v[firstIndex]! - firstLaneSpeed
@@ -3183,8 +3419,15 @@ function updateFocusedAudit(
 
   if (options.scenario === 'defense-legality') {
     const moved = Math.abs(second.latNow - state.previousDefenderLateral) > 0.003;
-    if (moved && second.prog < state.brakeProgress)
-      state.defenseMoveBeforeBrake = true;
+    const defensiveMotion =
+      second.racecraftDefensiveCommitment != null ||
+      second.racecraftDecision?.defensiveTargetCode != null;
+    if (defensiveMotion && moved) {
+      if (second.prog < state.brakeProgress)
+        state.defenseMoveBeforeBrake = true;
+      else if (!state.defenseMoveBeforeBrake)
+        state.defenseMoveAfterBrake = true;
+    }
     state.previousDefenderLateral = second.latNow;
     state.previousDefenderProgress = second.prog;
   }
@@ -3192,9 +3435,6 @@ function updateFocusedAudit(
   const hardContacts = (session.hitHard ?? 0) - state.initialHardContacts;
   const brakeAlongside = (session.brakeWhileAlongsideN ?? 0) - state.initialBrakeAlongside;
   const rearLoss = (session.rearLossStraightN ?? 0) - state.initialRearLoss;
-  const defenseBraking = (session.defenseMoveInBrakingN ?? 0) - state.initialDefenseBraking;
-  const defenseMirror = (session.defenseMirrorN ?? 0) - state.initialDefenseMirror;
-  if (defenseBraking > 0) state.defenseMoveAfterBrake = true;
   if (hardContacts > 0) {
     state.verdict = 'red';
     state.verdictReason = 'hard contact';
@@ -3202,11 +3442,11 @@ function updateFocusedAudit(
   }
   if ((options.scenario === 'alongside-straight' && (brakeAlongside > 0 || rearLoss > 0)) ||
       (options.scenario === 'defense-legality' &&
-        (defenseBraking > 0 || defenseMirror > 0))) {
+        state.defenseMoveAfterBrake)) {
     state.verdict = 'red';
     state.verdictReason = brakeAlongside > 0 ? 'braking while alongside' :
       rearLoss > 0 ? 'straight-line rear loss' :
-      defenseBraking > 0 ? 'defense moved in braking zone' : 'reactive defense mirror';
+      'defense moved in braking zone';
     return;
   }
 
@@ -3282,8 +3522,12 @@ function updateFocusedAudit(
       state.verdictReason = 'battle survived light contact';
     }
   } else if (options.scenario === 'defense-legality') {
-    const defenseMoves = (session.defMoveN ?? 0) - state.initialDefenseMoves;
-    const defenseBlocks = (session.defBlockedN ?? 0) - state.initialDefenseBlocks;
+    const defenseMoves =
+      (session.racecraftDefensiveMovesCommitted ?? 0) -
+        state.initialDefensiveMovesCommitted;
+    const defenseBlocks =
+      (session.racecraftDefensiveAuthorizedSideClosures ?? 0) -
+        state.initialDefensiveAuthorizedSideClosures;
     if (options.defenseVariant === 'committed') {
       if (defenseBlocks > 0 && !state.defenseMoveAfterBrake) {
         state.verdict = 'green';
@@ -3451,9 +3695,19 @@ export function runFocusedSession(
       : options.traffic === 'three-car' ? 3 : 2;
     const session: Session = options.scenario === 'priority' &&
       options.priorityReason === 'qualifying'
-      ? createFocusedQualifying(built, options.wet ?? 0, count)
-      : createFocusedRace(built, options.wet ?? 0, count);
-    session.racecraftDecisionLogging = true;
+      ? createFocusedQualifying(
+          built,
+          options.wet ?? 0,
+          count,
+          options.predictiveSafetyHz ?? 10
+        )
+      : createFocusedRace(
+          built,
+          options.wet ?? 0,
+          count,
+          options.predictiveSafetyHz ?? 10
+        );
+    session.racecraftDecisionLogging = false;
     setupFocusedScenario(session, options);
     const initialProgress = new Map(session.entries.map(entry => [entry.code, entry.prog]));
     const auditState = auditScenario ? makeFocusedAuditState() : null;
@@ -3589,16 +3843,48 @@ export function runFocusedSession(
             .map(([cornerId, count]) => [cornerId, { ...count }])
         ),
         racecraftSelectedJ: selectedJ,
-        racecraftCertificateBreaks: Object.fromEntries(
-          Object.entries(session.racecraftCertificateBreaks ?? {})
-            .sort(([left], [right]) => left.localeCompare(right))
-        ),
-        racecraftClaimRevisionReasons: Object.fromEntries(
-          Object.entries(session.racecraftClaimRevisionReasons ?? {})
-            .sort(([left], [right]) => left.localeCompare(right))
-        ),
         racecraftEvaluatorWork: {
           ...session.racecraftEvaluatorWork
+        },
+        racecraftDeliberationsByCar: {
+          ...session.racecraftDeliberationsByCar
+        },
+        racecraftPublicationsByCar: {
+          ...session.racecraftPublicationsByCar
+        },
+        racecraftDirectDecisionProofs: {
+          ...session.racecraftDirectDecisionProofs
+        },
+        racecraftOwnershipInvalidationsByReason: {
+          ...session.racecraftOwnershipInvalidationsByReason
+        },
+        racecraftDefensiveCandidateRejections: {
+          ...session.racecraftDefensiveCandidateRejections
+        },
+        racecraftDefensiveMinimumNoticeSecondsByOutcome:
+          Object.fromEntries(
+            Object.entries(
+              session
+                .racecraftDefensiveMinimumNoticeSecondsByOutcome ??
+                {}
+            ).map(([outcome, seconds]) => [
+              outcome,
+              round(seconds)
+            ])
+          ),
+        racecraftDefensiveMinimumAlongsideSecondsByOutcome:
+          Object.fromEntries(
+            Object.entries(
+              session
+                .racecraftDefensiveMinimumAlongsideSecondsByOutcome ??
+                {}
+            ).map(([outcome, seconds]) => [
+              outcome,
+              round(seconds)
+            ])
+          ),
+        racecraftSafetyPredicateRuns: {
+          ...session.racecraftSafetyPredicateRuns
         }
       },
       metrics: {
@@ -3622,15 +3908,11 @@ export function runFocusedSession(
         switchbackCompletions: session.switchbackCompletions ?? 0,
         brakeWhileAlongside: session.brakeWhileAlongsideN ?? 0,
         rearLossStraight: session.rearLossStraightN ?? 0,
-        defenseMoveInBraking: session.defenseMoveInBrakingN ?? 0,
-        defenseMirror: session.defenseMirrorN ?? 0,
         stationGapSamples: stationGaps.samples,
         stationGapMeanMetres: round(stationGaps.mean),
         stationGapStdDevMetres: round(stationGaps.standardDeviation),
         stationGapMinimumMetres: round(stationGaps.minimum),
         stationGapMaximumMetres: round(stationGaps.maximum),
-        defenseMoves: session.defMoveN ?? 0,
-        defenseBlocks: session.defBlockedN ?? 0,
         battleLapDelta: round(session.battleLapDeltaSum ?? 0),
         battleLapLossFraction: round(
           (session.battleLapDeltaSum ?? 0) /
@@ -3689,18 +3971,74 @@ export function runFocusedSession(
         candidatesEvaluated: session.racecraftCandidatesEvaluated ?? 0,
         pathsMaterialized: session.racecraftPathsMaterialized ?? 0,
         racecraftDecisionSwitches: session.racecraftDecisionSwitches ?? 0,
-        racecraftTier0Checks: session.racecraftTier0Checks ?? 0,
-        racecraftTier0Accepted: session.racecraftTier0Accepted ?? 0,
-        racecraftTier0IdealDominance:
-          session.racecraftTier0IdealDominance ?? 0,
-        racecraftTier0AcceptanceFraction: round(
-          (session.racecraftTier0Accepted ?? 0) /
-            Math.max(1, session.racecraftTier0Checks ?? 0)
+        racecraftDeliberations: session.racecraftDeliberations ?? 0,
+        racecraftTacticalPublications:
+          session.racecraftTacticalPublications ?? 0,
+        racecraftOffSlotPublicationAttempts:
+          session.racecraftOffSlotPublicationAttempts ?? 0,
+        racecraftSameSlotReopenings:
+          session.racecraftSameSlotReopenings ?? 0,
+        racecraftNestedResponseEvaluations:
+          session.racecraftNestedResponseEvaluations ?? 0,
+        racecraftDirectIdealDecisions:
+          session.racecraftDirectIdealDecisions ?? 0,
+        racecraftDirectFollowDecisions:
+          session.racecraftDirectFollowDecisions ?? 0,
+        racecraftDirectFollowWithoutCertificates:
+          session.racecraftDirectFollowWithoutCertificates ?? 0,
+        racecraftStagedCandidatesOpened:
+          session.racecraftStagedCandidatesOpened ?? 0,
+        racecraftStagedCandidatesRejected:
+          session.racecraftStagedCandidatesRejected ?? 0,
+        racecraftStagedCandidatesSelected:
+          session.racecraftStagedCandidatesSelected ?? 0,
+        racecraftStagedCandidatesCleared:
+          session.racecraftStagedCandidatesCleared ?? 0,
+        racecraftStagedAcquisitionConstrainedSeconds: round(
+          session.racecraftStagedAcquisitionConstrainedSeconds ?? 0
         ),
-        racecraftTier1Deliberations:
-          session.racecraftTier1Deliberations ?? 0,
-        racecraftUntrustedClaimSamples:
-          session.racecraftClaimUntrustedSamples ?? 0,
+        racecraftCommittedAttackViews:
+          session.racecraftCommittedAttackViews ?? 0,
+        racecraftDefensiveResponses:
+          session.racecraftDefensiveResponses ?? 0,
+        racecraftDefensiveMovesCommitted:
+          session.racecraftDefensiveMovesCommitted ?? 0,
+        racecraftDefensiveMovesContinued:
+          session.racecraftDefensiveMovesContinued ?? 0,
+        racecraftDefensiveMovesResetAtExit:
+          session.racecraftDefensiveMovesResetAtExit ?? 0,
+        racecraftDefensiveRoomProtectedCovers:
+          session.racecraftDefensiveRoomProtectedCovers ?? 0,
+        racecraftDefensiveAuthorizedSideClosures:
+          session.racecraftDefensiveAuthorizedSideClosures ?? 0,
+        racecraftDefensiveAuthorizedApproachConflicts:
+          session.racecraftDefensiveAuthorizedApproachConflicts ?? 0,
+        racecraftDefensivePreConsumptionSafetyInterventions:
+          session.racecraftDefensivePreConsumptionSafetyInterventions ?? 0,
+        racecraftSwitchbackFamilyChanges:
+          session.racecraftSwitchbackFamilyChanges ?? 0,
+        racecraftOwnershipAssertions:
+          session.racecraftOwnershipAssertions ?? 0,
+        racecraftOwnershipCurrentValidations:
+          session.racecraftOwnershipCurrentValidations ?? 0,
+        racecraftOwnershipInvalidations:
+          session.racecraftOwnershipInvalidations ?? 0,
+        racecraftDefenderReclaims:
+          session.racecraftDefenderReclaims ?? 0,
+        racecraftMaximumSingleFileTrainLength:
+          session.racecraftMaximumSingleFileTrainLength ?? 0,
+        racecraftLongestSingleFileTrainSeconds: round(
+          session.racecraftLongestSingleFileTrainSeconds ?? 0
+        ),
+        racecraftFasterCarBlockedSeconds: round(
+          session.racecraftFasterCarBlockedSeconds ?? 0
+        ),
+        predictiveSafetyHz: session.config.predictiveSafetyHz,
+        predictiveSafetyIntervalTicks:
+          session.racecraftPredictiveSafetyIntervalTicks,
+        racecraftSafetyPasses: session.racecraftSafetyPasses ?? 0,
+        racecraftSafetyInterventions:
+          session.racecraftSafetyInterventions ?? 0,
         racecraftInteractionSamples: Object.values(
           session.racecraftInteractionSamples ?? {}
         ).reduce((sum, count) => sum + (count ?? 0), 0),
@@ -3733,7 +4071,7 @@ export function runFocusedSession(
         sideAgreementsLive: session.sideAgreements?.size ?? 0,
         minimumDynamicPathSpeed: round(minimumDynamicLaneSpeed(session.entries)),
         maximumDynamicPathCurvature: round(
-          maximumDynamicLaneCurvature(session.entries)
+          maximumDynamicLaneCurvature(session.trk, session.entries)
         ),
         maximumPathSlew: round(Math.max(
           0,
@@ -3830,8 +4168,12 @@ export function runFocusedSession(
           auditSwitchbacks: (session.switchbackN ?? 0) - auditState.initialSwitchbacks,
           auditSwitchbackCompletions: (session.switchbackCompletions ?? 0) -
             auditState.initialSwitchbackCompletions,
-          auditDefenseMoves: (session.defMoveN ?? 0) - auditState.initialDefenseMoves,
-          auditDefenseBlocks: (session.defBlockedN ?? 0) - auditState.initialDefenseBlocks,
+          auditDefensiveMovesCommitted:
+            (session.racecraftDefensiveMovesCommitted ?? 0) -
+              auditState.initialDefensiveMovesCommitted,
+          auditDefensiveAuthorizedSideClosures:
+            (session.racecraftDefensiveAuthorizedSideClosures ?? 0) -
+              auditState.initialDefensiveAuthorizedSideClosures,
           auditHardContacts: (session.hitHard ?? 0) - auditState.initialHardContacts,
           auditEvaluatorSteerSelections: auditState.evaluatorSteerSelections,
           auditEvaluatorBrakeSelections: auditState.evaluatorBrakeSelections,

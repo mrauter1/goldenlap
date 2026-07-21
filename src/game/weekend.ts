@@ -8,6 +8,8 @@ import type {
   LineupEntry, QualifyingSession, RaceSession, SessionConfig
 } from '../session/model';
 import { QUALI_LEN, RACE_PACE_F, RACE_TARGET } from '../session/strategy';
+import { resolvePredictiveSafetyIntervalTicks } from
+  '../session/racecraft/reactive-safety';
 import { carModifiers } from './management';
 import type { GameState, TuningState } from './model';
 import type { BuiltTrack } from '../core/model';
@@ -120,6 +122,8 @@ export function createQualifyingSession(
     phase: 'run',
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks:
+      resolvePredictiveSafetyIntervalTicks(config.predictiveSafetyHz),
     done: false,
     over: false,
     camI: -1,
@@ -178,6 +182,8 @@ export function createRaceSession(
     endT: 0,
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks:
+      resolvePredictiveSafetyIntervalTicks(config.predictiveSafetyHz),
     camI: -1,
     raining: false,
     rainAt: -1,

@@ -1,19 +1,29 @@
 import {
+  backwardInducedSpeedLimit,
   botStep,
+  BOT_BRAKING_EFFORT_MAXIMUM,
+  BOT_BRAKING_EFFORT_MINIMUM,
   PATH_FOLLOWER_SETTLE_DISTANCE
 } from '../src/core/autopilot';
 import type {
   BuiltTrack,
   CarInput,
-  PathGeometry
+  PathGeometry,
+  SpeedEnvelope
 } from '../src/core/model';
-import { PHYS } from '../src/core/physics';
+import {
+  longitudinalAccelerationHeadroom,
+  PHYS
+} from '../src/core/physics';
 import {
   makeCar,
   stepCar,
   trackSense
 } from '../src/core/physics-engine';
 import { derivePathGeometry } from '../src/core/racing-line';
+import { speedEnvelopeFromSamples } from
+  '../src/core/speed-envelope';
+import { surfaceExposureAtLateral } from '../src/core/surface';
 import { TEAM_DEFS } from '../src/data/teams';
 import { PIT_TEAMS, TRACK_DEFS } from '../src/data/tracks';
 import { createEntry } from '../src/session/entry';
@@ -36,20 +46,25 @@ import { RACECRAFT_DECISION_INTERVAL_SECONDS } from
 import {
   TRAFFIC_NEIGHBOR_SCAN_METRES
 } from '../src/session/racecraft/config';
-import {
-  evaluateRacecraftDecision,
-  rebuildRacecraftSelectedProgram
-} from '../src/session/racecraft/evaluator';
+import { evaluateRacecraftDecision } from
+  '../src/session/racecraft/evaluator';
 import { racecraftFamilyStateAt } from
   '../src/session/racecraft/family-geometry';
 import { MANEUVER_PREDICTION } from
   '../src/session/racecraft/feasibility';
 import {
-  evaluateLaneProgram,
-  installRacecraftPathPlan
+  installRacecraftPathPlan,
+  LANE_BUFFER_CAPACITY,
+  LANE_BUFFER_DISTANCE_METRES
 } from '../src/session/racecraft/lane-program';
+import { publishRacecraftTacticalPublication } from
+  '../src/session/racecraft/publication';
+import { resolvePredictiveSafetyIntervalTicks } from
+  '../src/session/racecraft/reactive-safety';
 import {
   entryDynamicMu,
+  entryDynamicMuAt,
+  entryDownforceScale,
   entryMargin,
   entryMods,
   flowOff,
@@ -169,7 +184,8 @@ const MEASUREMENT_CONFIG: SessionConfig = Object.freeze({
   pitSkill: 0,
   pitFocus: 0,
   tuneBonus: 0,
-  tuningPoints: 0
+  tuningPoints: 0,
+  predictiveSafetyHz: 10
 });
 
 function forwardMetres(
@@ -277,6 +293,10 @@ function makeMeasurementSession(
     endT: 0,
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks:
+      resolvePredictiveSafetyIntervalTicks(
+        MEASUREMENT_CONFIG.predictiveSafetyHz
+      ),
     camI: -1,
     raining: false,
     rainAt: -1,
@@ -335,26 +355,6 @@ function setEntrySpeed(entry: Entry, speed: number): void {
   entry.car!.spd = speed;
 }
 
-function programSpeedAtProgress(
-  stations: readonly {
-    progress: number;
-    speed: number;
-  }[],
-  progress: number
-): number {
-  if (!stations.length) return NaN;
-  if (progress <= stations[0]!.progress) return stations[0]!.speed;
-  for (let index = 1; index < stations.length; index++) {
-    const to = stations[index]!;
-    if (progress > to.progress) continue;
-    const from = stations[index - 1]!;
-    const u = (progress - from.progress) /
-      Math.max(Number.EPSILON, to.progress - from.progress);
-    return from.speed + (to.speed - from.speed) * clamp(u, 0, 1);
-  }
-  return stations.at(-1)!.speed;
-}
-
 function nonFiniteOwnTimeValue(
   value: number
 ): NonFiniteAttackTransitionCandidate['ownTimeValue'] {
@@ -399,22 +399,7 @@ function diagnoseNonFiniteCandidate(
     break;
   }
 
-  const rebuilt = rebuildRacecraftSelectedProgram(
-    session,
-    entry,
-    session.entries,
-    candidate
-  );
-  const rolloutStationsFinite = !!rebuilt &&
-    rebuilt.stations.length > 0 &&
-    rebuilt.stations.every(station => [
-      station.time,
-      station.progress,
-      station.s,
-      station.lateral,
-      station.speed,
-      station.headingOffsetRadians
-    ].every(Number.isFinite));
+  const rolloutStationsFinite = Number.isFinite(candidate.ownTimeSeconds);
 
   let withinHorizonIntegral = 0;
   if (analyticGeometryFinite && rolloutStationsFinite) {
@@ -449,9 +434,9 @@ function diagnoseNonFiniteCandidate(
         Number.EPSILON,
         built.tr.idealPath.v[wrappedIndex]! * margin
       );
-      const candidateSpeed = programSpeedAtProgress(
-        rebuilt!.stations,
-        progress
+      const candidateSpeed = Math.max(
+        Number.EPSILON,
+        state.targetSpeed
       );
       withinHorizonIntegral += ds * (
         state.q / Math.max(Number.EPSILON, candidateSpeed) -
@@ -482,20 +467,41 @@ function diagnoseNonFiniteCandidate(
       candidate.plan,
       'measurement'
     );
-  const lane = evaluateLaneProgram(replaySession, replayEntry);
   let installedLaneLawFinite = true;
-  for (let slot = 0; slot < lane.count; slot++) {
-    if ([
-      lane.off[slot],
-      lane.k[slot],
-      lane.v[slot],
-      lane.ds[slot],
-      lane.mu[slot],
-      lane.drag[slot]
-    ].every(Number.isFinite))
-      continue;
-    installedLaneLawFinite = false;
-    break;
+  const program = replayEntry.racecraftLateralProgram;
+  if (program) {
+    const values = [
+      program.startProgress,
+      program.endProgress,
+      program.originLateral,
+      program.originFirstDerivative,
+      program.originSecondDerivative,
+      program.terminalEta,
+      ...program.segmentStartProgress,
+      ...program.segmentEndProgress,
+      ...program.c0,
+      ...program.c1,
+      ...program.c2,
+      ...program.c3,
+      ...program.c4,
+      ...program.c5
+    ];
+    installedLaneLawFinite = values.every(Number.isFinite);
+    try {
+      const envelope = measurementSpeedEnvelope(
+        replaySession,
+        replayEntry,
+        candidate.plan,
+        candidate.brakingEffort
+      );
+      installedLaneLawFinite &&=
+        [...envelope.segmentStartProgress,
+          ...envelope.segmentEndProgress,
+          ...envelope.v2AtStart,
+          ...envelope.slope].every(Number.isFinite);
+    } catch {
+      installedLaneLawFinite = false;
+    }
   }
 
   const source = !analyticGeometryFinite
@@ -566,6 +572,12 @@ function authoredAttackPairs(
     );
   setEntrySpeed(ego, initialSpeed);
   setEntrySpeed(leader, leaderSpeed);
+  leader._racecraftLastDecisionTrafficEpoch = 0;
+  publishRacecraftTacticalPublication(
+    session,
+    leader as Entry & { car: NonNullable<Entry['car']> },
+    0
+  );
 
   if (straight.availableMetres + Number.EPSILON <
       leaderGap + PHYS.carLen)
@@ -576,8 +588,7 @@ function authoredAttackPairs(
   const noHazard = (candidate: RacecraftCandidateEvaluation): boolean =>
     candidate.feasible &&
     candidate.hazardCount === 0 &&
-    candidate.billSeconds === 0 &&
-    candidate.recourseSeconds === 0;
+    candidate.billSeconds === 0;
   const relevant = decision.candidates.filter(candidate =>
     noHazard(candidate) &&
     (
@@ -642,6 +653,119 @@ function signedTrackDelta(
   return wrapped > trackLength / 2 ? wrapped - trackLength : wrapped;
 }
 
+/**
+ * Rebuild the measurement replay's capability law from analytic family
+ * states. This is a cold audit source, not a runtime lane-buffer authority.
+ */
+function measurementSpeedEnvelope(
+  session: RaceSession,
+  entry: Entry,
+  plan: PathPlan,
+  brakingEffort: number
+): SpeedEnvelope {
+  const track = session.trk;
+  const active = entry as Entry & { car: NonNullable<Entry['car']> };
+  const count = Math.min(
+    LANE_BUFFER_CAPACITY,
+    Math.ceil(LANE_BUFFER_DISTANCE_METRES / track.step) + 2
+  );
+  const progress = new Array<number>(count);
+  const speed = new Array<number>(count);
+  const states = new Array<ReturnType<typeof racecraftFamilyStateAt>>(count);
+  const surfaceMu = new Array<number>(count);
+  for (let slot = 0; slot < count; slot++) {
+    const at = entry.prog + slot * track.step;
+    const state = racecraftFamilyStateAt(
+      session,
+      active,
+      at,
+      plan
+    );
+    const index = (
+      active.car.progIdx + slot
+    ) % track.n;
+    progress[slot] = at;
+    states[slot] = state;
+    surfaceMu[slot] = surfaceExposureAtLateral(
+      track,
+      index,
+      state.lateral
+    ).mu;
+    speed[slot] = state.targetSpeed;
+  }
+
+  const downforceScale = entryDownforceScale(entry);
+  const modifiers = entryMods(entry, session.wet);
+  let reachableSpeed = Math.max(0, entry.spd);
+  for (let slot = 0; slot < count - 1; slot++) {
+    const state = states[slot]!;
+    reachableSpeed = Math.min(reachableSpeed, speed[slot]!);
+    const dynamicMu = entryDynamicMuAt(
+      entry,
+      session,
+      reachableSpeed,
+      state.curvature
+    ) * surfaceMu[slot]!;
+    const headroom = longitudinalAccelerationHeadroom(
+      reachableSpeed,
+      state.curvature,
+      dynamicMu,
+      downforceScale
+    );
+    const driveForce = Math.min(
+      PHYS.Fmax * modifiers.pw,
+      PHYS.power * modifiers.pw / Math.max(4, reachableSpeed)
+    );
+    const resistance =
+      PHYS.kDrag * modifiers.dr * reachableSpeed * reachableSpeed +
+      PHYS.kRoll +
+      reachableSpeed * Math.max(0, state.surfaceDrag);
+    const acceleration = Math.min(
+      (driveForce - resistance) / PHYS.m,
+      headroom
+    );
+    reachableSpeed = Math.sqrt(Math.max(
+      0,
+      reachableSpeed * reachableSpeed +
+        2 * acceleration * state.q * track.step
+    ));
+    speed[slot + 1] = Math.min(speed[slot + 1]!, reachableSpeed);
+  }
+
+  const effort = clamp(
+    brakingEffort,
+    BOT_BRAKING_EFFORT_MINIMUM,
+    BOT_BRAKING_EFFORT_MAXIMUM
+  );
+  for (let slot = count - 2; slot >= 0; slot--) {
+    const state = states[slot]!;
+    const index = (active.car.progIdx + slot) % track.n;
+    const referenceSpeed = track.idealPath.v[index]!;
+    const dynamicMu = entryDynamicMuAt(
+      entry,
+      session,
+      referenceSpeed,
+      state.curvature
+    ) * surfaceMu[slot]!;
+    const passiveDeceleration = (
+      PHYS.kDrag * modifiers.dr * referenceSpeed * referenceSpeed +
+      PHYS.kRoll +
+      referenceSpeed * Math.max(0, state.surfaceDrag)
+    ) / PHYS.m;
+    speed[slot] = backwardInducedSpeedLimit(
+      speed[slot + 1]!,
+      speed[slot]!,
+      state.q * track.step,
+      state.curvature,
+      dynamicMu,
+      downforceScale,
+      effort,
+      passiveDeceleration
+    );
+  }
+  return speedEnvelopeFromSamples(progress, speed);
+}
+
 function replayToProgress(
   built: BuiltTrack,
   pathGeometry: PathGeometry,
@@ -665,6 +789,7 @@ function replayToProgress(
     initialSpeed
   );
   const session = makeMeasurementSession(built, [entry]);
+  let speedEnvelope: SpeedEnvelope | null = null;
   if (plan.mode !== 'ideal' && plan.mode !== 'pit') {
     installRacecraftPathPlan(
       built.tr,
@@ -673,7 +798,12 @@ function replayToProgress(
       plan,
       'measurement'
     );
-    evaluateLaneProgram(session, entry);
+    speedEnvelope = measurementSpeedEnvelope(
+      session,
+      entry,
+      plan,
+      brakingEffort
+    );
   }
   const car = entry.car!;
   let input: CarInput = {
@@ -712,8 +842,18 @@ function replayToProgress(
         brakingEffort,
         powerScale: modifiers.pw,
         controlStepSeconds: CONTROL_STEP_SECONDS,
-        path: built.tr.idealPath,
-        ...(entry.laneBuffer ? { lane: entry.laneBuffer } : {})
+        ...(entry.racecraftLateralProgram
+          ? {
+              lateralProgram: entry.racecraftLateralProgram,
+              pathProgress: progress
+            }
+          : { path: built.tr.idealPath }),
+        ...(speedEnvelope
+          ? {
+              speedEnvelope,
+              speedProgress: progress
+            }
+          : {})
       });
     }
     const previousProgress = progress;

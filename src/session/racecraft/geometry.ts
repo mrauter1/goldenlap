@@ -9,6 +9,8 @@ import type {
   CornerLineTerminal,
   Track
 } from '../../core/model';
+import { compactLateralGeometryAtProgress } from
+  '../../core/lateral-program';
 import {
   availableDeceleration,
   cornerSpeedForGrip,
@@ -34,13 +36,6 @@ import {
 } from './interpolation';
 
 type ActiveEntry = Entry & { car: Car };
-
-/** Declared sporting racing room, applied only to overlap agreements. */
-export const SPORTING_RACING_ROOM_DAYLIGHT_METRES = 0.15;
-
-export function sportingSideAgreementCentreClearance(): number {
-  return PHYS.carWid + SPORTING_RACING_ROOM_DAYLIGHT_METRES;
-}
 
 export interface LateralBounds {
   minimum: number;
@@ -854,10 +849,15 @@ function lateralAccelerationHeadroom(
     entryMu(entry, session.wet),
     entryDownforceScale(entry)
   );
-  const currentLaneSlot = entry.laneBuffer?.startIndex === index ? 0 : -1;
-  const curvature = currentLaneSlot >= 0
-    ? entry.laneBuffer!.k[currentLaneSlot]!
-    : (entry.path ?? track.idealPath)?.k[index] ?? track.kSm[index]!;
+  const curvature = entry.pathPlan?.mode === 'pit' && entry.path
+    ? entry.path.k[index]!
+    : entry.racecraftLateralProgram
+      ? compactLateralGeometryAtProgress(
+          track,
+          entry.racecraftLateralProgram,
+          entry.prog
+        ).curvature
+      : (entry.path ?? track.idealPath)?.k[index] ?? track.kSm[index]!;
   const lateral = entry.spd * entry.spd * Math.abs(curvature);
   const longitudinal = includeCurrentBraking
     ? clamp(entry.inp.brake, 0, 1) * Math.min(

@@ -12,13 +12,11 @@ import {
   withRacecraftCalibration
 } from '../../../src/session/racecraft/config';
 import {
-  claimDefenseResponse,
   physicalLateralMoveSeconds
 } from '../../../src/session/racecraft/traffic';
 import {
   utilizationMistakeProbability
 } from '../../../src/session/racecraft/utilization';
-import { racecraftOneMoveLegal } from '../../../src/session/racecraft/evaluator';
 import { entryMods } from '../../../src/session/strategy';
 
 const TEAM = { id: 'traffic-test', name: 'Traffic Test', body: '#000', accent: '#fff' } as const;
@@ -42,63 +40,6 @@ function entry(code: string): Entry {
 }
 
 describe('traffic episode state', () => {
-  test('allows one defense per concurrently active attacker', () => {
-    const defender = entry('DEF');
-    const first = entry('A');
-    const second = entry('B');
-
-    expect(claimDefenseResponse(defender, first)).toBe(true);
-    expect(claimDefenseResponse(defender, second)).toBe(true);
-    expect(claimDefenseResponse(defender, first)).toBe(false);
-
-    delete defender._defSeenAttackers?.[first.code];
-    expect(claimDefenseResponse(defender, first)).toBe(true);
-    expect(claimDefenseResponse(defender, first)).toBe(false);
-  });
-
-  test('enforces the recorded one-move rule in candidate legality', () => {
-    const defender = entry('DEF');
-    const attacker = entry('ATK');
-    defender.state = 'run';
-    attacker.state = 'run';
-    defender.car = { s: 100 } as Entry['car'];
-    attacker.car = { s: 95 } as Entry['car'];
-    defender.latNow = 0;
-    attacker.latNow = -2;
-    defender._racecraftAppliedKind = 'corner-inside';
-    defender._defSeenAttackers = { ATK: true };
-    attacker.racecraftDecision = {
-      selectedPlanNumericId: 1,
-      selectedPlanKey: 'attack',
-      candidates: [{
-        planNumericId: 1,
-        plan: {
-          mode: 'side-inside',
-          key: 'attack',
-          anchors: [],
-          leaderCode: 'DEF',
-          surfaceAuthorization: 'normal'
-        }
-      }]
-    } as unknown as NonNullable<Entry['racecraftDecision']>;
-    const session = {
-      trk: { len: 1000 }
-    } as Session;
-
-    expect(racecraftOneMoveLegal(
-      session, defender, [defender, attacker], 'corner-inside', -1
-    )).toBe(true);
-    expect(racecraftOneMoveLegal(
-      session, defender, [defender, attacker], 'corner-outside', -1
-    )).toBe(false);
-    expect(racecraftOneMoveLegal(
-      session, defender, [defender, attacker], 'hold', -1
-    )).toBe(true);
-    expect(racecraftOneMoveLegal(
-      session, defender, [defender, attacker], 'corner-outside', 1
-    )).toBe(true);
-  });
-
   test('derives bounded deterministic line and braking character', () => {
     const track = { corners: [{ id: 'corner-one' }, { id: 'corner-two' }] } as unknown as Track;
     const first = entry('CHAR');

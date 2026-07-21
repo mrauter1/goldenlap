@@ -250,7 +250,6 @@ function racecraftDecisionDiagnostics(
     droppedSamples: number;
     ownTimeSeconds: number;
     billSeconds: number;
-    recourseSeconds: number;
     tieBandSeconds: number;
     totalSeconds: number;
     hazardCount: number;
@@ -302,9 +301,6 @@ function racecraftDecisionDiagnostics(
       ),
       billSeconds: weighted(
         summary => summary.diagnostics.racecraftSelectedJ.billSeconds
-      ),
-      recourseSeconds: weighted(
-        summary => summary.diagnostics.racecraftSelectedJ.recourseSeconds
       ),
       tieBandSeconds: weighted(
         summary => summary.diagnostics.racecraftSelectedJ.tieBandSeconds
@@ -428,10 +424,6 @@ function addPopulationObservations(
       race => race.metrics.brakeWhileAlongside);
     countRate('race.rear_loss_straight_per_race',
       race => race.metrics.rearLossStraight);
-    countRate('race.defense_move_in_braking_per_race',
-      race => race.metrics.defenseMoveInBraking);
-    countRate('race.defense_mirror_per_race',
-      race => race.metrics.defenseMirror);
     const battleLapSamples = sum(races.map(race => race.metrics.battleLapSamples));
     observations.push({
       metric: 'race.battle_lap_delta_seconds',
@@ -671,11 +663,6 @@ export function invariantObservations(
       value: sum(races.map(race => race.metrics.pitFalseLeaders)) +
         sum(focused.map(summary => metricValue(summary, 'pitFalseLeaders'))),
       samples
-    },
-    {
-      metric: 'invariant.repeated_defense',
-      value: sum(races.map(race => race.metrics.repeatedDefenses)),
-      samples: races.length
     },
     {
       metric: 'invariant.soft_contact_concede',

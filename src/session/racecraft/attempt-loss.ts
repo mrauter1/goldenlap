@@ -38,9 +38,8 @@ export const MEASURED_ATTACK_TRANSITION_LOSS_PROVENANCE = Object.freeze({
   refinedPhysicsStepSeconds: 0.004166666666666667,
   controlStepSeconds: 0.016666666666666666,
   deliberationIntervalSeconds: 0.1,
-  predictionHorizonSeconds: 2.4,
   commonProgressRule:
-    'initial speed multiplied by the production prediction horizon',
+    'attack family authored terminal rejoin progress',
   straightOriginRule:
     'first grid sample after controller-settle distance beyond prior corner exit',
   leaderPlacementRule:
@@ -60,22 +59,22 @@ export const MEASURED_ATTACK_TRANSITION_LOSS_PROVENANCE = Object.freeze({
     'paulista'
   ]),
   productionClassCount: 12,
-  eligibleStraightCount: 65,
-  sampleCount: 1464,
+  eligibleStraightCount: 81,
+  sampleCount: 1803,
   completeDomain: true,
   nonFiniteCandidateCount: 0,
-  residualMeanSeconds: 0.10945370587317264,
-  residualMinimumSeconds: -0.7111678411231055,
-  residualMaximumSeconds: 0.8273349760877938,
-  lossMeanSeconds: 0.13556064173925947,
-  lossMaximumSeconds: 0.8273349760877938,
+  residualMeanSeconds: 0.01946341871475489,
+  residualMinimumSeconds: -0.806176365440987,
+  residualMaximumSeconds: 1.0720327453159437,
+  lossMeanSeconds: 0.06674665779269824,
+  lossMaximumSeconds: 1.0720327453159437,
   convergence: Object.freeze({
-    maximumResidualDifferenceSeconds: 0.08006636092183061,
-    meanResidualDifferenceSeconds: 0.009631774129833645,
-    refinedResidualMeanSeconds: 0.11447772199645025,
-    aggregateResidualMeanDifferenceSeconds: 0.005024016123277603,
-    refinedLossMeanSeconds: 0.1417761355631283,
-    aggregateLossMeanDifferenceSeconds: 0.006215493823868823,
+    maximumResidualDifferenceSeconds: 0.15630634587289727,
+    meanResidualDifferenceSeconds: 0.007855577543569468,
+    refinedResidualMeanSeconds: 0.02259781811296709,
+    aggregateResidualMeanDifferenceSeconds: 0.003134399398212199,
+    refinedLossMeanSeconds: 0.07055431960378424,
+    aggregateLossMeanDifferenceSeconds: 0.003807661811085994,
     errorDirection:
       'halving the physics step increases the aggregate loss estimate'
   }),

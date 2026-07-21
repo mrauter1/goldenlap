@@ -266,6 +266,11 @@ export function installTestApi(options: TestApiOptions): GoldenLapTestApi {
         seed,
         clean: runSingleCar(built, { laps: 1, seed }),
         pair: runFocusedSession(built, { scenario: 'pair', seed }),
+        pairSafety30: runFocusedSession(built, {
+          scenario: 'pair',
+          seed,
+          predictiveSafetyHz: 30
+        }),
         pit: runFocusedSession(built, { scenario: 'pit', seed }),
         priority: runFocusedSession(built, { scenario: 'priority', seed }),
         classification: runFocusedSession(built, { scenario: 'classification', seed })

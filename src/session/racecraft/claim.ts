@@ -1,73 +1,384 @@
-import type { Track } from '../../core/model';
-import { clamp, normAng } from '../../shared/math';
-import type { RacecraftClaim, RacecraftClaimStations } from '../model';
+import {
+  numericArray,
+  type Track
+} from '../../core/model';
+import {
+  writeCompactLateralPoseAtProgress,
+  writeSampleCompactLateralProgram
+} from
+  '../../core/lateral-program';
+import { cloneCompactLateralProgram } from './compact-path';
+import { normAng } from '../../shared/math';
+import type {
+  RacecraftClaim,
+  RacecraftLateralProgram,
+  RacecraftTrajectoryProgram
+} from '../model';
 
-export interface RacecraftClaimStationInput {
-  readonly time: number;
-  readonly s: number;
-  readonly centre: number;
-  readonly speed: number;
+export interface RacecraftTrajectoryPointInput {
+  readonly timeSeconds: number;
+  readonly sMetres: number;
+  readonly lateralMetres: number;
+  readonly speedMetresPerSecond: number;
   readonly headingOffsetRadians: number;
 }
 
-export function createRacecraftClaimStations(
-  capacity: number
-): RacecraftClaimStations {
+export interface RacecraftTrajectorySegmentInput {
+  readonly startTimeSeconds: number;
+  readonly endTimeSeconds: number;
+  readonly startProgressMetres: number;
+  readonly endProgressMetres: number;
+  readonly startSpeedMetresPerSecond: number;
+  readonly endSpeedMetresPerSecond: number;
+  readonly startLateralMetres: number;
+  readonly endLateralMetres: number;
+  readonly startHeadingOffsetRadians: number;
+  readonly endHeadingOffsetRadians: number;
+}
+
+export function createRacecraftTrajectoryProgram(
+  capacity: number,
+  originProgress: number,
+  originTrackS: number,
+  lateralProgram: RacecraftLateralProgram | null
+): RacecraftTrajectoryProgram {
   return {
-    length: 0,
-    time: new Float64Array(capacity),
-    s: new Float64Array(capacity),
-    y: new Float64Array(capacity),
-    v: new Float64Array(capacity),
-    heading: new Float64Array(capacity)
+    originProgress,
+    originTrackS,
+    segmentCount: capacity,
+    segmentStartTime: numericArray(capacity),
+    segmentEndTime: numericArray(capacity),
+    progressAtStart: numericArray(capacity),
+    progressC1: numericArray(capacity),
+    progressC2: numericArray(capacity),
+    progressC3: numericArray(capacity),
+    fallbackLateralAtStart: numericArray(capacity),
+    fallbackLateralRate: numericArray(capacity),
+    fallbackHeadingAtStart: numericArray(capacity),
+    fallbackHeadingRate: numericArray(capacity),
+    lateralProgram
   };
 }
 
-export function racecraftClaimStationsFromRows(
-  rows: readonly RacecraftClaimStationInput[]
-): RacecraftClaimStations {
-  const stations = createRacecraftClaimStations(rows.length);
-  stations.length = rows.length;
-  for (let index = 0; index < rows.length; index++) {
-    const row = rows[index]!;
-    stations.time[index] = row.time;
-    stations.s[index] = row.s;
-    stations.y[index] = row.centre;
-    stations.v[index] = row.speed;
-    stations.heading[index] = row.headingOffsetRadians;
-  }
-  return stations;
-}
-
-export interface RacecraftEvaluationClaim {
-  /** Immutable publication advanced to the evaluation epoch. */
-  claim: RacecraftClaim;
-}
-
-function cyclicIndex(track: Track, index: number): number {
-  return ((Math.round(index) % track.n) + track.n) % track.n;
+/** Write one owned Hermite motion segment into construction buffers. */
+export function writeRacecraftTrajectorySegment(
+  program: RacecraftTrajectoryProgram,
+  index: number,
+  input: RacecraftTrajectorySegmentInput
+): void {
+  if (index < 0 || index >= program.segmentCount)
+    throw new RangeError('Trajectory segment index is outside its capacity');
+  const seconds = input.endTimeSeconds - input.startTimeSeconds;
+  if (!(seconds > 0) || !Number.isFinite(seconds))
+    throw new RangeError('Trajectory segment requires positive finite time');
+  const distance =
+    input.endProgressMetres - input.startProgressMetres;
+  const startSpeed = Math.max(0, input.startSpeedMetresPerSecond);
+  const endSpeed = Math.max(0, input.endSpeedMetresPerSecond);
+  program.segmentStartTime[index] = input.startTimeSeconds;
+  program.segmentEndTime[index] = input.endTimeSeconds;
+  program.progressAtStart[index] = input.startProgressMetres;
+  program.progressC1[index] = startSpeed;
+  program.progressC2[index] =
+    3 * distance / (seconds * seconds) -
+    (2 * startSpeed + endSpeed) / seconds;
+  program.progressC3[index] =
+    -2 * distance / (seconds * seconds * seconds) +
+    (startSpeed + endSpeed) / (seconds * seconds);
+  program.fallbackLateralAtStart[index] =
+    input.startLateralMetres;
+  program.fallbackLateralRate[index] =
+    (input.endLateralMetres - input.startLateralMetres) / seconds;
+  program.fallbackHeadingAtStart[index] =
+    input.startHeadingOffsetRadians;
+  program.fallbackHeadingRate[index] = normAng(
+    input.endHeadingOffsetRadians -
+    input.startHeadingOffsetRadians
+  ) / seconds;
 }
 
 function cyclicProgress(track: Track, progress: number): number {
   return ((progress % track.len) + track.len) % track.len;
 }
 
-function forwardTrackDistance(track: Track, from: number, to: number): number {
-  const distance = to - from;
-  return distance < 0 ? distance + track.len : distance;
-}
-
 function signedTrackDistance(track: Track, from: number, to: number): number {
-  let distance = forwardTrackDistance(track, from, to);
+  let distance = (
+    (to - from) % track.len + track.len
+  ) % track.len;
   if (distance > track.len / 2) distance -= track.len;
   return distance;
 }
 
+/**
+ * Test/fixture constructor for direct trajectory segments. Production authors
+ * segments from the installed lateral and longitudinal programs directly.
+ */
+export function racecraftTrajectoryProgramFromRows(
+  track: Track,
+  origin: RacecraftTrajectoryPointInput,
+  rows: readonly RacecraftTrajectoryPointInput[],
+  originProgress = 0
+): RacecraftTrajectoryProgram {
+  const program = createRacecraftTrajectoryProgram(
+    rows.length,
+    originProgress,
+    origin.sMetres,
+    null
+  );
+  let previous = origin;
+  let progress = originProgress;
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index]!;
+    const nextProgress = progress +
+      signedTrackDistance(track, previous.sMetres, row.sMetres);
+    writeRacecraftTrajectorySegment(program, index, {
+      startTimeSeconds: previous.timeSeconds,
+      endTimeSeconds: row.timeSeconds,
+      startProgressMetres: progress,
+      endProgressMetres: nextProgress,
+      startSpeedMetresPerSecond: previous.speedMetresPerSecond,
+      endSpeedMetresPerSecond: row.speedMetresPerSecond,
+      startLateralMetres: previous.lateralMetres,
+      endLateralMetres: row.lateralMetres,
+      startHeadingOffsetRadians: previous.headingOffsetRadians,
+      endHeadingOffsetRadians: row.headingOffsetRadians
+    });
+    previous = row;
+    progress = nextProgress;
+  }
+  return program;
+}
+
+export interface RacecraftEvaluationClaim {
+  /** Immutable publication advanced mathematically to the evaluation epoch. */
+  claim: RacecraftClaim;
+}
+
 export interface RacecraftClaimState {
+  progressMetres: number;
   s: number;
   lateral: number;
   speed: number;
   headingOffsetRadians: number;
+}
+
+export interface RacecraftClaimTowState {
+  s: number;
+  lateral: number;
+}
+
+const trajectoryLateralPoseScratch = {
+  lateralMetres: 0,
+  headingOffsetRadians: 0
+};
+const trajectoryTowLateralScratch = {
+  value: 0,
+  firstDerivative: 0,
+  secondDerivative: 0
+};
+
+function trajectorySegmentIndexAt(
+  program: RacecraftTrajectoryProgram,
+  seconds: number
+): number {
+  let low = 0;
+  let high = program.segmentCount - 1;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (seconds > program.segmentEndTime[middle]!)
+      low = middle + 1;
+    else
+      high = middle;
+  }
+  return low;
+}
+
+/** Allocation-free longitudinal-only trajectory query for progress roots. */
+export function racecraftTrajectoryProgressAtTime(
+  program: RacecraftTrajectoryProgram,
+  seconds: number
+): number {
+  if (program.segmentCount === 0)
+    return program.originProgress + Math.max(0, seconds) * 0;
+  const target = Math.max(0, seconds);
+  const horizon =
+    program.segmentEndTime[program.segmentCount - 1]!;
+  const index = target <= horizon
+    ? trajectorySegmentIndexAt(program, target)
+    : program.segmentCount - 1;
+  const startTime = program.segmentStartTime[index]!;
+  const endTime = program.segmentEndTime[index]!;
+  const local = Math.max(
+    0,
+    Math.min(endTime, target) - startTime
+  );
+  const c1 = program.progressC1[index]!;
+  const c2 = program.progressC2[index]!;
+  const c3 = program.progressC3[index]!;
+  let progress =
+    program.progressAtStart[index]! +
+    c1 * local +
+    c2 * local * local +
+    c3 * local * local * local;
+  if (target > horizon) {
+    const speed = Math.max(
+      0,
+      c1 + 2 * c2 * local + 3 * c3 * local * local
+    );
+    progress += speed * (target - horizon);
+  }
+  return progress;
+}
+
+export function writeRacecraftTrajectoryStateAtTime(
+  track: Track,
+  program: RacecraftTrajectoryProgram,
+  seconds: number,
+  out: RacecraftClaimState
+): RacecraftClaimState {
+  if (program.segmentCount === 0) {
+    out.progressMetres =
+      program.originProgress + Math.max(0, seconds) * 0;
+    out.s = program.originTrackS;
+    out.lateral = 0;
+    out.speed = 0;
+    out.headingOffsetRadians = 0;
+    return out;
+  }
+  const target = Math.max(0, seconds);
+  const horizon =
+    program.segmentEndTime[program.segmentCount - 1]!;
+  const index = target <= horizon
+    ? trajectorySegmentIndexAt(program, target)
+    : program.segmentCount - 1;
+  const startTime = program.segmentStartTime[index]!;
+  const endTime = program.segmentEndTime[index]!;
+  const local = Math.max(
+    0,
+    Math.min(endTime, target) - startTime
+  );
+  const c1 = program.progressC1[index]!;
+  const c2 = program.progressC2[index]!;
+  const c3 = program.progressC3[index]!;
+  let progress =
+    program.progressAtStart[index]! +
+    c1 * local +
+    c2 * local * local +
+    c3 * local * local * local;
+  let speed = Math.max(
+    0,
+    c1 + 2 * c2 * local + 3 * c3 * local * local
+  );
+  let fallbackLocal = local;
+  if (target > horizon) {
+    const elapsed = target - horizon;
+    progress += speed * elapsed;
+    fallbackLocal += elapsed;
+  }
+  out.progressMetres = progress;
+  out.s = cyclicProgress(
+    track,
+    program.originTrackS + progress - program.originProgress
+  );
+  if (program.lateralProgram) {
+    const lateral = writeCompactLateralPoseAtProgress(
+      track,
+      program.lateralProgram,
+      progress,
+      trajectoryLateralPoseScratch
+    );
+    out.lateral = lateral.lateralMetres;
+    out.headingOffsetRadians = lateral.headingOffsetRadians;
+  } else {
+    out.lateral =
+      program.fallbackLateralAtStart[index]! +
+      program.fallbackLateralRate[index]! * fallbackLocal;
+    out.headingOffsetRadians = normAng(
+      program.fallbackHeadingAtStart[index]! +
+      program.fallbackHeadingRate[index]! * fallbackLocal
+    );
+  }
+  out.speed = speed;
+  return out;
+}
+
+export function racecraftTrajectoryStateAtTime(
+  track: Track,
+  program: RacecraftTrajectoryProgram,
+  seconds: number
+): RacecraftClaimState {
+  return writeRacecraftTrajectoryStateAtTime(
+    track,
+    program,
+    seconds,
+    {
+      progressMetres: 0,
+      s: 0,
+      lateral: 0,
+      speed: 0,
+      headingOffsetRadians: 0
+    }
+  );
+}
+
+export function racecraftTrajectoryHorizonSeconds(
+  program: RacecraftTrajectoryProgram
+): number {
+  return program.segmentCount > 0
+    ? program.segmentEndTime[program.segmentCount - 1]!
+    : 0;
+}
+
+/**
+ * Installed and published trajectory values own their buffers. Defensive
+ * lineage clones the selected program once so later construction scratch can
+ * never expand the authorized envelope.
+ */
+export function cloneRacecraftTrajectoryProgram(
+  program: RacecraftTrajectoryProgram
+): RacecraftTrajectoryProgram {
+  const clone = createRacecraftTrajectoryProgram(
+    program.segmentCount,
+    program.originProgress,
+    program.originTrackS,
+    program.lateralProgram
+      ? cloneCompactLateralProgram(program.lateralProgram)
+      : null
+  );
+  clone.segmentStartTime.set(program.segmentStartTime);
+  clone.segmentEndTime.set(program.segmentEndTime);
+  clone.progressAtStart.set(program.progressAtStart);
+  clone.progressC1.set(program.progressC1);
+  clone.progressC2.set(program.progressC2);
+  clone.progressC3.set(program.progressC3);
+  clone.fallbackLateralAtStart.set(
+    program.fallbackLateralAtStart
+  );
+  clone.fallbackLateralRate.set(program.fallbackLateralRate);
+  clone.fallbackHeadingAtStart.set(
+    program.fallbackHeadingAtStart
+  );
+  clone.fallbackHeadingRate.set(program.fallbackHeadingRate);
+  return clone;
+}
+
+export function racecraftClaimHorizonSeconds(
+  claim: RacecraftClaim
+): number {
+  return racecraftTrajectoryHorizonSeconds(claim.trajectory);
+}
+
+export function racecraftClaimSegmentCount(
+  claim: RacecraftClaim
+): number {
+  return claim.trajectory.segmentCount;
+}
+
+export function racecraftClaimSegmentEndTime(
+  claim: RacecraftClaim,
+  index: number
+): number {
+  return claim.trajectory.segmentEndTime[index]!;
 }
 
 /** Write continuous state on the immutable publication into caller scratch. */
@@ -77,90 +388,73 @@ export function writeRacecraftClaimStateAtTime(
   time: number,
   out: RacecraftClaimState
 ): RacecraftClaimState {
-  const targetTime = Math.max(0, time);
-  let fromTime = 0;
-  let fromS = claim.originS;
-  let fromLateral = claim.originCentre;
-  let fromSpeed = claim.originSpeed;
-  let fromHeading = claim.originHeadingOffsetRadians;
-  const stations = claim.stations;
-  for (let index = 0; index < stations.length; index++) {
-    const stationTime = stations.time[index]!;
-    if (targetTime > stationTime) {
-      fromTime = stationTime;
-      fromS = stations.s[index]!;
-      fromLateral = stations.y[index]!;
-      fromSpeed = stations.v[index]!;
-      fromHeading = stations.heading[index]!;
-      continue;
-    }
-    const u = clamp(
-      (targetTime - fromTime) /
-        Math.max(Number.EPSILON, stationTime - fromTime),
+  return writeRacecraftTrajectoryStateAtTime(
+    track,
+    claim.trajectory,
+    claim.trajectoryTimeOffsetSeconds + Math.max(0, time),
+    out
+  );
+}
+
+/** Write only the immutable publication coordinates consumed by wake lookup. */
+export function writeRacecraftClaimTowStateAtTime(
+  track: Track,
+  claim: RacecraftClaim,
+  time: number,
+  out: RacecraftClaimTowState
+): RacecraftClaimTowState {
+  const program = claim.trajectory;
+  if (program.segmentCount === 0) {
+    out.s = program.originTrackS;
+    out.lateral = 0;
+    return out;
+  }
+  const target = Math.max(
+    0,
+    claim.trajectoryTimeOffsetSeconds + Math.max(0, time)
+  );
+  const horizon =
+    program.segmentEndTime[program.segmentCount - 1]!;
+  const index = target <= horizon
+    ? trajectorySegmentIndexAt(program, target)
+    : program.segmentCount - 1;
+  const startTime = program.segmentStartTime[index]!;
+  const endTime = program.segmentEndTime[index]!;
+  const local = Math.max(
+    0,
+    Math.min(endTime, target) - startTime
+  );
+  const c1 = program.progressC1[index]!;
+  const c2 = program.progressC2[index]!;
+  const c3 = program.progressC3[index]!;
+  let progress =
+    program.progressAtStart[index]! +
+    c1 * local +
+    c2 * local * local +
+    c3 * local * local * local;
+  let fallbackLocal = local;
+  if (target > horizon) {
+    const speed = Math.max(
       0,
-      1
+      c1 + 2 * c2 * local + 3 * c3 * local * local
     );
-    // A station interval is far shorter than half a lap, so the signed cyclic
-    // displacement is unique. Treating every negative seam as forward motion
-    // turns a sub-noise reanchor correction into an almost-full-lap jump.
-    const stationS = stations.s[index]!;
-    const stationLateral = stations.y[index]!;
-    const stationSpeed = stations.v[index]!;
-    const stationHeading = stations.heading[index]!;
-    const distance = signedTrackDistance(track, fromS, stationS);
-    out.s = cyclicProgress(track, fromS + distance * u);
-    out.lateral = fromLateral +
-      (stationLateral - fromLateral) * u;
-    out.speed = fromSpeed + (stationSpeed - fromSpeed) * u;
-    out.headingOffsetRadians = normAng(
-      fromHeading +
-      normAng(stationHeading - fromHeading) * u
-    );
-    return out;
+    const elapsed = target - horizon;
+    progress += speed * elapsed;
+    fallbackLocal += elapsed;
   }
-  const lastIndex = stations.length - 1;
-  if (lastIndex >= 0 && targetTime > stations.time[lastIndex]!) {
-    const previousIndex = lastIndex - 1;
-    const previousTime = previousIndex >= 0
-      ? stations.time[previousIndex]!
-      : 0;
-    const previousLateral = previousIndex >= 0
-      ? stations.y[previousIndex]!
-      : claim.originCentre;
-    const previousHeading = previousIndex >= 0
-      ? stations.heading[previousIndex]!
-      : claim.originHeadingOffsetRadians;
-    const lastTime = stations.time[lastIndex]!;
-    const lastLateral = stations.y[lastIndex]!;
-    const lastHeading = stations.heading[lastIndex]!;
-    const lastSpeed = stations.v[lastIndex]!;
-    const span = Math.max(Number.EPSILON, lastTime - previousTime);
-    const lateralRate = (lastLateral - previousLateral) / span;
-    const headingRate = normAng(
-      lastHeading - previousHeading
-    ) / span;
-    const elapsed = targetTime - lastTime;
-    out.s = cyclicProgress(
-      track,
-      stations.s[lastIndex]! + Math.max(0, lastSpeed) * elapsed
-    );
-    out.lateral = lastLateral + lateralRate * elapsed;
-    out.speed = lastSpeed;
-    out.headingOffsetRadians = normAng(
-      lastHeading + headingRate * elapsed
-    );
-    return out;
-  }
-  out.s = lastIndex >= 0 ? stations.s[lastIndex]! : claim.originS;
-  out.lateral = lastIndex >= 0
-    ? stations.y[lastIndex]!
-    : claim.originCentre;
-  out.speed = lastIndex >= 0
-    ? stations.v[lastIndex]!
-    : claim.originSpeed;
-  out.headingOffsetRadians = lastIndex >= 0
-    ? stations.heading[lastIndex]!
-    : claim.originHeadingOffsetRadians;
+  out.s = cyclicProgress(
+    track,
+    program.originTrackS + progress - program.originProgress
+  );
+  out.lateral = program.lateralProgram
+    ? writeSampleCompactLateralProgram(
+        track,
+        program.lateralProgram,
+        progress,
+        trajectoryTowLateralScratch
+      ).value
+    : program.fallbackLateralAtStart[index]! +
+      program.fallbackLateralRate[index]! * fallbackLocal;
   return out;
 }
 
@@ -171,6 +465,7 @@ export function racecraftClaimStateAtTime(
   time: number
 ): RacecraftClaimState {
   return writeRacecraftClaimStateAtTime(track, claim, time, {
+    progressMetres: 0,
     s: 0,
     lateral: 0,
     speed: 0,
@@ -189,8 +484,9 @@ const evaluationEpochCache =
   new WeakMap<RacecraftClaim, EvaluationEpochCache>();
 
 /**
- * Advance an immutable publication to one common evaluation epoch.
- * Publication identity and its stored snapshot remain untouched.
+ * Advance an immutable publication to one common evaluation epoch. The owned
+ * segment buffers are retained without copying or mutation; the consumer view
+ * carries only a mathematical time offset and current origin.
  */
 export function racecraftClaimAtEvaluationEpoch(
   track: Track,
@@ -223,24 +519,8 @@ export function racecraftClaimAtEvaluationEpoch(
     byTime.set(evaluationAt, view);
     return view;
   }
-
   const origin = racecraftClaimStateAtTime(track, claim, age);
-  const stations = createRacecraftClaimStations(claim.stations.length);
-  stations.length = claim.stations.length;
-  for (let index = 0; index < stations.length; index++) {
-    const stationTime = claim.stations.time[index]!;
-    const state = racecraftClaimStateAtTime(
-      track,
-      claim,
-      age + stationTime
-    );
-    stations.time[index] = stationTime;
-    stations.s[index] = state.s;
-    stations.v[index] = state.speed;
-    stations.y[index] = state.lateral;
-    stations.heading[index] = state.headingOffsetRadians;
-  }
-  const view = {
+  const view: RacecraftEvaluationClaim = {
     claim: {
       ...claim,
       publishedAt: evaluationAt,
@@ -248,82 +528,10 @@ export function racecraftClaimAtEvaluationEpoch(
       originCentre: origin.lateral,
       originSpeed: origin.speed,
       originHeadingOffsetRadians: origin.headingOffsetRadians,
-      stations
+      trajectoryTimeOffsetSeconds:
+        claim.trajectoryTimeOffsetSeconds + age
     }
   };
   byTime.set(evaluationAt, view);
   return view;
-}
-
-/**
- * Exact point-publication identity at one common epoch. Measured noise does
- * not define a publication class: every changed prediction is information,
- * while each consumer's incremental β check decides whether it matters.
- */
-export function racecraftClaimsSharePublication(
-  track: Track,
-  previous: RacecraftClaim,
-  claim: RacecraftClaim
-): boolean {
-  if (previous.code !== claim.code ||
-      previous.source !== claim.source ||
-      previous.trusted !== claim.trusted ||
-      previous.predictionKey !== claim.predictionKey ||
-      previous.lateralAuthorityRevision !==
-        claim.lateralAuthorityRevision ||
-      previous.longitudinalAuthorityRevision !==
-        claim.longitudinalAuthorityRevision ||
-      previous.stations.length !== claim.stations.length)
-    return false;
-  for (let index = 0; index < claim.stations.length; index++)
-    if (previous.stations.time[index] !== claim.stations.time[index])
-      return false;
-
-  const age = claim.publishedAt - previous.publishedAt;
-  if (!Number.isFinite(age) || age < 0) return false;
-  const matchesAt = (
-    time: number,
-    s: number,
-    lateral: number,
-    speed: number,
-    headingOffsetRadians: number,
-    compareLateral: boolean
-  ): boolean => {
-    const predicted = racecraftClaimStateAtTime(
-      track,
-      previous,
-      age + time
-    );
-    return (!compareLateral || lateral === predicted.lateral) &&
-      s === predicted.s &&
-      speed === predicted.speed &&
-      headingOffsetRadians === predicted.headingOffsetRadians;
-  };
-
-  if (!matchesAt(
-    0,
-    claim.originS,
-    claim.originCentre,
-    claim.originSpeed,
-    claim.originHeadingOffsetRadians,
-    true
-  )) return false;
-  const previousHorizon = previous.stations.length > 0
-    ? previous.stations.time[previous.stations.length - 1]!
-    : 0;
-  for (let index = 0; index < claim.stations.length; index++)
-    // Reanchoring appends a new tail interval. Only the overlapping support
-    // can contain changed information relative to the predecessor.
-    if (age + claim.stations.time[index]! <=
-          previousHorizon + Number.EPSILON &&
-        !matchesAt(
-          claim.stations.time[index]!,
-          claim.stations.s[index]!,
-          claim.stations.y[index]!,
-          claim.stations.v[index]!,
-          claim.stations.heading[index]!,
-          true
-        ))
-      return false;
-  return true;
 }

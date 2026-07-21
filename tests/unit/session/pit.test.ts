@@ -78,7 +78,8 @@ function raceSession(trackIndex: number): RaceSession {
       pitSkill: 1,
       pitFocus: 1,
       tuneBonus: 0,
-      tuningPoints: 0
+      tuningPoints: 0,
+      predictiveSafetyHz: 10
     },
     events: [],
     t: 20,
@@ -89,6 +90,7 @@ function raceSession(trackIndex: number): RaceSession {
     phase: 'run',
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks: 3,
     goT: 0,
     camI: 0,
     mode: 'race',
@@ -122,6 +124,7 @@ function qualifyingSession(trackIndex: number): QualifyingSession {
     phase: 'run',
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks: 3,
     goT: 0,
     camI: 0,
     mode: 'quali',

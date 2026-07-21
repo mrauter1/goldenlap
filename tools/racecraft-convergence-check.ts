@@ -53,15 +53,7 @@ function compactOutcome(
     reactionEvents: metric(summary, 'racecraftReactionEvents'),
     liftSamplesOutsideBlue:
       metric(summary, 'racecraftLiftSamplesOutsideBlue'),
-    tier0Checks: metric(summary, 'racecraftTier0Checks'),
-    tier0Accepted: metric(summary, 'racecraftTier0Accepted'),
-    tier0AcceptanceFraction:
-      metric(summary, 'racecraftTier0AcceptanceFraction'),
-    tier0IdealDominance:
-      metric(summary, 'racecraftTier0IdealDominance'),
-    tier1Deliberations:
-      metric(summary, 'racecraftTier1Deliberations'),
-    certificateBreaks: summary.diagnostics.racecraftCertificateBreaks,
+    deliberations: metric(summary, 'racecraftDeliberations'),
     selectedJ: summary.diagnostics.racecraftSelectedJ,
     checksum: summary.checksum
   };

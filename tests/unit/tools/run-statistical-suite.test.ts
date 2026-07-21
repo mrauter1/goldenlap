@@ -23,7 +23,6 @@ function raceSummary(
       unexplainedStalls: 0,
       pitDeadlocks: 0,
       pitFalseLeaders: 0,
-      repeatedDefenses: 0,
       softContactConcedes: 0,
       pathOutOfBoundsRejections: 0,
       ...metrics

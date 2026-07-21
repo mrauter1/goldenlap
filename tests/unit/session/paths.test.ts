@@ -13,6 +13,8 @@ import type {
   Entry,
   LineupEntry,
   PathPlan,
+  RacecraftClaim,
+  RacecraftDecision,
   RaceSession
 } from '../../../src/session/model';
 import {
@@ -27,13 +29,20 @@ import { sampleQuinticHermiteSegment } from '../../../src/session/racecraft/inte
 import {
   clearLaneProgram,
   editLaneTarget,
-  evaluateLaneProgram
+  evaluateLaneProgram,
+  installRacecraftPathPlan
 } from '../../../src/session/racecraft/lane-program';
 import { evaluateManeuverPlanCompact } from '../../../src/session/racecraft/feasibility';
+import { updateRacecraftSideAgreements } from
+  '../../../src/session/racecraft/corridor-planner';
+import { publishRacecraftTacticalPublication } from
+  '../../../src/session/racecraft/publication';
 import {
-  publishRacecraftClaimSnapshot,
-  updateRacecraftSideAgreements
-} from '../../../src/session/racecraft/corridor-planner';
+  racecraftClaimSegmentCount,
+  racecraftClaimSegmentEndTime,
+  racecraftClaimStateAtTime,
+  racecraftTrajectoryProgramFromRows
+} from '../../../src/session/racecraft/claim';
 import { entryDynamicMu, entryMu } from '../../../src/session/strategy';
 import { evaluateRacecraftDecision } from '../../../src/session/racecraft/evaluator';
 import { bestPassingCorner } from '../../../src/session/racecraft/traffic';
@@ -79,7 +88,8 @@ function session(trackIndex = 0): RaceSession {
       pitSkill: 1,
       pitFocus: 1,
       tuneBonus: 0,
-      tuningPoints: 0
+      tuningPoints: 0,
+      predictiveSafetyHz: 10
     },
     events: [],
     t: 20,
@@ -90,6 +100,7 @@ function session(trackIndex = 0): RaceSession {
     phase: 'run',
     uiT: 0,
     trafT: 0,
+    racecraftPredictiveSafetyIntervalTicks: 3,
     goT: 0,
     camI: 0,
     mode: 'race',
@@ -114,11 +125,11 @@ function publishAllClaims(session: RaceSession): void {
       entry.state === 'pitOut')
   ) as Array<Entry & { car: NonNullable<Entry['car']> }>;
   updateRacecraftSideAgreements(session, active);
-  publishRacecraftClaimSnapshot(
-    session,
-    session.entries,
-    new Set(active.map(entry => entry.code))
-  );
+  const epoch = session.racecraftTrafficEpoch ?? 0;
+  for (const value of active) {
+    value._racecraftLastDecisionTrafficEpoch = epoch;
+    publishRacecraftTacticalPublication(session, value, epoch);
+  }
 }
 
 function placeAtIndex(sessionValue: RaceSession, value: ActiveEntry, index: number, speed = 28): void {
@@ -153,6 +164,149 @@ function setLateral(sessionValue: RaceSession, value: ActiveEntry, lateral: numb
 }
 
 describe('phase-varying racecraft lane programs', () => {
+  test('evaluates defense once against one immutable attacker publication', () => {
+    const race = session();
+    const attacker = entry('FIXED-ATTACKER');
+    const defender = entry('ONE-SLOT-DEFENDER');
+    const corner = race.trk.corners.find(value =>
+      value.id === 'prado-c08')!;
+    const defenderIndex = corner.approachI;
+    const attackerIndex = (
+      defenderIndex -
+      Math.ceil((PHYS.carLen + 12) / race.trk.step) +
+      race.trk.n
+    ) % race.trk.n;
+    placeAtIndex(race, attacker, attackerIndex, 40);
+    placeAtIndex(race, defender, defenderIndex, 30);
+    race.entries = [attacker, defender];
+    evaluateLaneProgram(race, attacker);
+    evaluateLaneProgram(race, defender);
+    publishAllClaims(race);
+
+    const published = race.racecraftClaims!.get(attacker.code)!;
+    const horizon = 3;
+    const attackerPublication: RacecraftClaim = Object.freeze({
+      ...published,
+      mode: 'staged-attack',
+      targetCode: defender.code,
+      cornerId: corner.id,
+      selectedPlanNumericId: 81,
+      selectedFamilyNumericId: 82,
+      trajectory: racecraftTrajectoryProgramFromRows(
+        race.trk,
+        {
+          timeSeconds: 0,
+          sMetres: attacker.car.s,
+          lateralMetres: attacker.latNow,
+          speedMetresPerSecond: attacker.spd,
+          headingOffsetRadians: 0
+        },
+        [
+          {
+            timeSeconds: 1,
+            sMetres: (
+              attacker.car.s + attacker.spd
+            ) % race.trk.len,
+            lateralMetres: attacker.latNow - 1,
+            speedMetresPerSecond: attacker.spd,
+            headingOffsetRadians: 0
+          },
+          {
+            timeSeconds: horizon,
+            sMetres: (
+              attacker.car.s + attacker.spd * horizon
+            ) % race.trk.len,
+            lateralMetres: attacker.latNow - 2.5,
+            speedMetresPerSecond: attacker.spd,
+            headingOffsetRadians: 0
+          }
+        ],
+        attacker.prog
+      )
+    });
+    const publications = new Map(race.racecraftClaims)
+      .set(attacker.code, attackerPublication);
+    race.racecraftClaims = publications;
+    const attackerDecision = Object.freeze({
+      at: race.t,
+      selectedKind: 'corner-inside'
+    }) as RacecraftDecision;
+    attacker.racecraftDecision = attackerDecision;
+
+    const decision = evaluateRacecraftDecision(
+      race,
+      defender,
+      race.entries
+    )!;
+
+    expect(decision.candidateCount).toBeLessThanOrEqual(6);
+    expect(
+      decision.defensiveTargetCode === attacker.code ||
+      decision.candidates.some(candidate =>
+        candidate.vetoes.some(veto =>
+          veto.startsWith('defensive-')))
+    ).toBe(true);
+    expect(race.racecraftEvaluatorWork?.decisionCalls).toBe(1);
+    expect(race.racecraftNestedResponseEvaluations ?? 0).toBe(0);
+    expect(
+      decision.defensiveTargetCode == null ||
+      decision.cornerOwnershipAssertion == null
+    ).toBe(true);
+    expect(attacker.racecraftDecision).toBe(attackerDecision);
+    expect(race.racecraftClaims).toBe(publications);
+    expect(race.racecraftClaims.get(attacker.code))
+      .toBe(attackerPublication);
+  });
+
+  test('opens exact-width staged families after a corner attack gate has passed', () => {
+    const race = session();
+    const follower = entry('STAGED-FOLLOWER');
+    const leader = entry('STAGED-LEADER');
+    const corner = race.trk.corners.find(value =>
+      value.id === 'prado-c06')!;
+    const start = (corner.trackOutI + 5) % race.trk.n;
+    placeAtIndex(race, follower, start, 40);
+    placeAtIndex(
+      race,
+      leader,
+      ahead(race, start, PHYS.carLen + 0.15),
+      40
+    );
+    race.entries = [follower, leader];
+    evaluateLaneProgram(race, follower);
+    evaluateLaneProgram(race, leader);
+    publishAllClaims(race);
+
+    const decision = evaluateRacecraftDecision(
+      race,
+      follower,
+      race.entries
+    )!;
+    const staged = decision.candidates.flatMap(candidate => {
+      const plan = candidate.plan;
+      return plan.mode !== 'ideal' &&
+        plan.mode !== 'pit' &&
+        (plan.mode === 'side-inside' ||
+          plan.mode === 'side-outside')
+        ? [{ candidate, plan }]
+        : [];
+    });
+
+    expect(staged.length).toBeGreaterThan(0);
+    expect(staged.some(({ candidate, plan }) =>
+      plan.cornerId == null &&
+      candidate.slowPointOwnerCode == null
+    )).toBe(true);
+    expect(staged.every(({ plan }) =>
+      plan.lineBlend != null &&
+      plan.lineBlend > 0 &&
+      plan.lineBlend <= 1
+    )).toBe(true);
+    expect(['corner-inside', 'corner-outside'])
+      .not.toContain(decision.selectedKind);
+    expect(decision.candidateCount).toBeLessThanOrEqual(6);
+  });
+
   test('binds brake-behind to its backward-composed slow point', () => {
     const race = session();
     const follower = entry('FOLLOWER');
@@ -167,10 +321,43 @@ describe('phase-varying racecraft lane programs', () => {
     evaluateLaneProgram(race, follower);
     evaluateLaneProgram(race, leader);
     publishAllClaims(race);
-    const claim = race.racecraftClaims!.get(leader.code)!;
-    for (let index = 0; index < claim.stations.length; index++)
-      claim.stations.v[index] = 55;
-    claim.stations.v[0] = 0;
+    const published = race.racecraftClaims!.get(leader.code)!;
+    const rows = Array.from(
+      { length: racecraftClaimSegmentCount(published) },
+      (_, index) => {
+        const time = racecraftClaimSegmentEndTime(published, index);
+        const state = racecraftClaimStateAtTime(
+          race.trk,
+          published,
+          time
+        );
+        return {
+          timeSeconds: time,
+          sMetres: state.s,
+          lateralMetres: state.lateral,
+          speedMetresPerSecond: index === 0 ? 0 : 55,
+          headingOffsetRadians: state.headingOffsetRadians
+        };
+      }
+    );
+    const claim: RacecraftClaim = {
+      ...published,
+      trajectory: racecraftTrajectoryProgramFromRows(
+        race.trk,
+        {
+          timeSeconds: 0,
+          sMetres: published.originS,
+          lateralMetres: published.originCentre,
+          speedMetresPerSecond: published.originSpeed,
+          headingOffsetRadians:
+            published.originHeadingOffsetRadians
+        },
+        rows,
+        leader.prog
+      )
+    };
+    race.racecraftClaims = new Map(race.racecraftClaims)
+      .set(leader.code, claim);
     leader.spd = 55;
     leader.car.spd = 55;
 
@@ -184,11 +371,16 @@ describe('phase-varying racecraft lane programs', () => {
 
     expect(candidate.slowPointOwnerCode).toBe(leader.code);
     expect(candidate.slowPoint).not.toBeNull();
-    expect(candidate.slowPoint!.speed).toBe(claim.stations.v[0]);
+    const firstPublishedSpeed = racecraftClaimStateAtTime(
+      race.trk,
+      claim,
+      racecraftClaimSegmentEndTime(claim, 0)
+    ).speed;
+    expect(candidate.slowPoint!.speed).toBe(firstPublishedSpeed);
     expect(candidate.slowPoint!.distance).toBeGreaterThan(0);
     expect(candidate.slowPoint).toEqual({
       distance: candidate.slowPoint!.distance,
-      speed: claim.stations.v[0],
+      speed: firstPublishedSpeed,
       ownerCode: leader.code,
       reason: 'traffic-follow:cost-candidate',
       stationS: (
@@ -243,14 +435,14 @@ describe('phase-varying racecraft lane programs', () => {
       ['LOWER:MIDDLE', {
         side: -1,
         separatorEta: -0.5,
-        centreClearance: PHYS.carWid + 0.15,
+        centreClearance: PHYS.carWid,
         familyCertificate: certificate,
         since: race.t
       }],
       ['MIDDLE:UPPER', {
         side: -1,
         separatorEta: 0.5,
-        centreClearance: PHYS.carWid + 0.15,
+        centreClearance: PHYS.carWid,
         familyCertificate: certificate,
         since: race.t
       }]
@@ -493,18 +685,50 @@ describe('phase-varying racecraft lane programs', () => {
       .toBeCloseTo(expectedEta.secondDerivative, 12);
   });
 
-  test('feeds the pinned lane authority to the production controller', () => {
+  test('feeds compact tactical authority directly to the production controller', () => {
     const race = session();
     const value = entry('SCALAR');
     placeAtIndex(race, value, 240, 24);
     value.pathMode = 'ideal';
-    editLaneTarget(race, value, 2.2, 'test-controller-lane');
+    const staleLane = evaluateLaneProgram(race, value);
+    for (let slot = 0; slot < staleLane.count; slot++)
+      staleLane.off[slot] = -2.2;
+    const targetIndex = (value.car.progIdx + 40) % race.trk.n;
+    const plan = {
+      mode: 'side-outside',
+      key: 'test:direct-controller',
+      anchors: [
+        {
+          index: value.car.progIdx,
+          offset: value.latNow,
+          s: value.prog
+        },
+        {
+          index: targetIndex,
+          offset: 2.2,
+          s: value.prog + 40 * race.trk.step
+        }
+      ],
+      pinnedFirst: true,
+      topology: 'right',
+      terminal: 'ideal-rejoin',
+      surfaceAuthorization: 'normal'
+    } satisfies Exclude<
+      PathPlan,
+      { mode: 'ideal' } | { mode: 'pit' }
+    >;
+    installRacecraftPathPlan(
+      race.trk,
+      value,
+      `space:${plan.key}`,
+      plan,
+      'racecraft:self'
+    );
     value.botTick = 0;
     race.entries = [value];
-    const lane = evaluateLaneProgram(race, value);
     const expected = botStep(race.trk, race.prof, value.car, {
-      path: race.trk.idealPath,
-      lane
+      lateralProgram: value.racecraftLateralProgram!,
+      pathProgress: value.prog
     });
     const erased = botStep(race.trk, race.prof, value.car, {
       path: race.trk.idealPath,
@@ -515,6 +739,7 @@ describe('phase-varying racecraft lane programs', () => {
 
     expect(value.inp.steer).toBeCloseTo(expected.steer, 12);
     expect(Math.abs(value.inp.steer - erased.steer)).toBeGreaterThan(0.01);
+    expect(value.laneBuffer).toBe(staleLane);
   });
 
   test('pit sync is the only sampled-path installer', () => {
@@ -571,7 +796,7 @@ describe('phase-varying racecraft lane programs', () => {
     expect(outside.rejections).toContain('road-bound');
   });
 
-  test('keeps one immutable claim snapshot throughout candidate evaluation', () => {
+  test('keeps immutable publications unchanged throughout evaluation', () => {
     const race = session();
     const left = entry('LEFT');
     const right = entry('RIGHT');
@@ -588,10 +813,16 @@ describe('phase-varying racecraft lane programs', () => {
     evaluateLaneProgram(race, left);
     evaluateLaneProgram(race, right);
     publishAllClaims(race);
-    const snapshot = race.racecraftClaims!;
-    const leftStations = snapshot.get(left.code)!.stations;
+    const publications = race.racecraftClaims!;
+    const leftPublication = publications.get(left.code)!;
+    const leftTrajectory = leftPublication.trajectory;
     const leftCentres = Array.from(
-      leftStations.y.subarray(0, leftStations.length)
+      { length: racecraftClaimSegmentCount(leftPublication) },
+      (_, index) => racecraftClaimStateAtTime(
+        race.trk,
+        leftPublication,
+        racecraftClaimSegmentEndTime(leftPublication, index)
+      ).lateral
     );
 
     const end = ahead(race, start, 90);
@@ -633,20 +864,32 @@ describe('phase-varying racecraft lane programs', () => {
       null
     );
     expect(second.feasible).toBe(true);
-    expect(race.racecraftClaims).toBe(snapshot);
-    const standingLeftStations = snapshot.get(left.code)!.stations;
+    expect(race.racecraftClaims).toBe(publications);
+    const standingLeftPublication = publications.get(left.code)!;
+    expect(standingLeftPublication.trajectory).toBe(leftTrajectory);
     expect(Array.from(
-      standingLeftStations.y.subarray(0, standingLeftStations.length)
+      { length: racecraftClaimSegmentCount(standingLeftPublication) },
+      (_, index) => racecraftClaimStateAtTime(
+        race.trk,
+        standingLeftPublication,
+        racecraftClaimSegmentEndTime(standingLeftPublication, index)
+      ).lateral
     )).toEqual(leftCentres);
 
     editLaneTarget(race, left, -1, 'new-selected-program');
     evaluateLaneProgram(race, left);
     race.t += 1 / 30;
     publishAllClaims(race);
-    expect(race.racecraftClaims).not.toBe(snapshot);
-    const immutableLeftStations = snapshot.get(left.code)!.stations;
+    expect(race.racecraftClaims).not.toBe(publications);
+    const immutableLeftPublication = publications.get(left.code)!;
+    expect(immutableLeftPublication.trajectory).toBe(leftTrajectory);
     expect(Array.from(
-      immutableLeftStations.y.subarray(0, immutableLeftStations.length)
+      { length: racecraftClaimSegmentCount(immutableLeftPublication) },
+      (_, index) => racecraftClaimStateAtTime(
+        race.trk,
+        immutableLeftPublication,
+        racecraftClaimSegmentEndTime(immutableLeftPublication, index)
+      ).lateral
     )).toEqual(leftCentres);
   });
 

@@ -7,11 +7,14 @@ import {
 import {
   numericArray,
   type BotParameters,
+  type CompactLateralProgram,
   type NumericArray,
   type SampledPath,
   type SpeedProfile,
   type Track
 } from '../../../src/core/model';
+import { speedEnvelopeFromSamples } from
+  '../../../src/core/speed-envelope';
 import { cornerSpeedForGrip, PHYS } from '../../../src/core/physics';
 import { makeCar } from '../../../src/core/physics-engine';
 
@@ -51,7 +54,8 @@ function straightFixture(): {
     ty: samples(0, 0, 0, 0),
     nx: samples(0, 0, 0, 0),
     ny: samples(1, 1, 1, 1),
-    kSm: samples(0, 0, 0, 0)
+    kSm: samples(0, 0, 0, 0),
+    idealPath: path
   } as unknown as Track;
   return { track, profile, path };
 }
@@ -111,11 +115,51 @@ describe('autopilot speed-law authority', () => {
       brakingEffort: 0.82
     };
     const expected = botStep(track, profile, car, parameters);
-    const legacyRuntimeObject = {
+    const extraneousRuntimeObject = {
       ...parameters,
       traffic: { distance: 0, speed: 0 }
     };
 
-    expect(botStep(track, profile, car, legacyRuntimeObject)).toEqual(expected);
+    expect(botStep(track, profile, car, extraneousRuntimeObject)).toEqual(expected);
+  });
+
+  test('consumes compact lateral and speed programs without a lane buffer', () => {
+    const { track, profile } = straightFixture();
+    const car = makeCar(0, 0, 0);
+    car.progIdx = 0;
+    car.vx = 20;
+    car.spd = 20;
+    const zeros = samples(0);
+    const lateralProgram: CompactLateralProgram = {
+      startProgress: 0,
+      endProgress: 90,
+      segmentCount: 1,
+      originLateral: 2,
+      originFirstDerivative: 0,
+      originSecondDerivative: 0,
+      reference: new Uint8Array([0]),
+      segmentStartProgress: samples(0),
+      segmentEndProgress: samples(90),
+      c0: samples(2),
+      c1: zeros.slice() as NumericArray,
+      c2: zeros.slice() as NumericArray,
+      c3: zeros.slice() as NumericArray,
+      c4: zeros.slice() as NumericArray,
+      c5: zeros.slice() as NumericArray,
+      terminal: 'ideal',
+      terminalEta: 0
+    };
+    const direct = botStep(track, profile, car, {
+      lateralProgram,
+      pathProgress: 0,
+      speedEnvelope: speedEnvelopeFromSamples([0, 120], [10, 10]),
+      speedProgress: 0,
+      margin: 1
+    });
+    const erased = botStep(track, profile, car, { margin: 1 });
+
+    expect(Math.abs(direct.steer - erased.steer)).toBeGreaterThan(0.01);
+    expect(direct.brake).toBeGreaterThan(0);
+    expect(erased.brake).toBe(0);
   });
 });

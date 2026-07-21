@@ -37,15 +37,15 @@ describe('measured attack-transition loss', () => {
       MEASURED_ATTACK_TRANSITION_LOSS_PROVENANCE.nonFiniteCandidateCount
     ).toBe(0);
     expect(MEASURED_ATTACK_TRANSITION_LOSS_PROVENANCE.sampleCount)
-      .toBe(1464);
+      .toBe(1803);
     expect(MEASURED_ATTACK_TRANSITION_LOSS_SECONDS)
-      .toBe(0.13556064173925947);
+      .toBe(0.06674665779269824);
     expect(measuredAttackTransitionLossSeconds())
       .toBe(MEASURED_ATTACK_TRANSITION_LOSS_SECONDS);
     expect(
       MEASURED_ATTACK_TRANSITION_LOSS_PROVENANCE.convergence
         .aggregateLossMeanDifferenceSeconds
-    ).toBe(0.006215493823868823);
+    ).toBe(0.003807661811085994);
     expect(
       MEASURED_ATTACK_TRANSITION_LOSS_PROVENANCE.convergence.errorDirection
     ).toContain('increases');

@@ -257,6 +257,9 @@ export function updateAttackEpisodes(session: Session): void {
     if (attacker.prog > target.prog + 1e-6) {
       recordAttackPaceOutcome(session, episode, true);
       session.attackCompletions = (session.attackCompletions ?? 0) + 1;
+      if (episode.switchback)
+        session.switchbackCompletions =
+          (session.switchbackCompletions ?? 0) + 1;
       const corner = session.cornerPassCounts?.[episode.cornerId];
       if (corner) corner.passes++;
       episodes.delete(key);
